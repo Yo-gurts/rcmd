@@ -8,3 +8,8 @@ __pycache__/
 # 编辑器
 .vscode/
 .idea/
+
+# 编辑器交换/临时文件
+*.swp
+*.swo
+*~

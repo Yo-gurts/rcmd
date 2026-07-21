@@ -97,6 +97,11 @@ server:
 ./rcmd exec board  "false"; echo $?   # → 1，真实的远程退出码
 ./rcmd ls                         # 查看设备与连接状态</code></pre>
 
+<h3>4. 安装 AI skill（可选）</h3>
+<p><code>skills/rcmd/SKILL.md</code> 会告诉 AI 助手（如 Claude Code）何时以及如何使用 rcmd（exec 与 raw 之分、<code>top</code> 用 batch 模式、会话有状态等）。软链到 <code>~/.claude/skills/</code>，任何会话即可自动识别：</p>
+<pre><code>mkdir -p ~/.claude/skills
+ln -s "$PWD/skills/rcmd" ~/.claude/skills/rcmd   # 或 cp -r</code></pre>
+
 <h2>给 AI 调用者的说明</h2>
 <ul>
 <li><code>exec</code> 用于<strong>会正常返回</strong>的命令（有退出码）。它的退出码等于远程命令的退出码，判断成败的方式和本地命令一致。</li>

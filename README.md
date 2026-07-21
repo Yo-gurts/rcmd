@@ -45,6 +45,23 @@ Edit `devices.yaml` to describe your devices (telnet needs login/password
 prompts; ssh needs user + password or key auth). `devices.yaml` is gitignored
 so your credentials never get committed.
 
+Optionally add `~/rcmd` to your `PATH` so you can call `rcmd` from anywhere:
+
+```bash
+echo 'export PATH="$HOME/rcmd:$PATH"' >> ~/.bashrc && source ~/.bashrc
+```
+
+## Claude Code / AI skill
+
+`skills/rcmd/SKILL.md` teaches an AI assistant when and how to use `rcmd`
+(exec vs raw, batch mode for `top`, stateful sessions). Install it so any
+session picks it up automatically:
+
+```bash
+mkdir -p ~/.claude/skills
+ln -s "$PWD/skills/rcmd" ~/.claude/skills/rcmd   # or cp -r
+```
+
 ## Usage
 
 ```bash
