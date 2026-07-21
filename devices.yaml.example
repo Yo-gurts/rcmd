@@ -1,0 +1,24 @@
+# rcmd device inventory (示例模板)
+# 复制为 devices.yaml 并填入真实信息：cp devices.yaml.example devices.yaml
+# devices.yaml 已被 .gitignore 忽略，不会提交真实密码。
+#
+# Each device is a named remote shell target reached over telnet or ssh.
+# rcmd keeps one persistent shell per device so cd/env/state survive across calls.
+
+board:
+  transport: telnet
+  host: 192.168.1.50
+  port: 23
+  username: root
+  password: CHANGE_ME
+  login_prompt: "login:"            # regex, awaited before sending username
+  password_prompt: "[Pp]assword:"   # regex, awaited before sending password
+  shell_prompt: "[#$] $"            # regex, marks the interactive shell is ready
+
+server:
+  transport: ssh
+  host: 10.0.0.1
+  port: 22
+  username: youruser
+  password: CHANGE_ME               # ssh 可用密码或留空走 key 认证
+  shell_prompt: "[#$] $"

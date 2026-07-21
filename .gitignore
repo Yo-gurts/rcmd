@@ -1,0 +1,10 @@
+# 真实设备配置（含密码），不提交
+devices.yaml
+
+# Python 运行时产物
+__pycache__/
+*.pyc
+
+# 编辑器
+.vscode/
+.idea/

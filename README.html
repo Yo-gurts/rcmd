@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>rcmd — 远程命令工具</title>
+<style>
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; line-height: 1.6; color: #333; }
+h1 { border-bottom: 2px solid #2684FF; padding-bottom: 10px; }
+h2 { color: #2684FF; margin-top: 2em; }
+h3 { margin-top: 1.5em; }
+code { background: #f4f5f7; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
+pre { background: #f4f5f7; padding: 16px; border-radius: 6px; overflow-x: auto; }
+pre code { padding: 0; background: none; }
+table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+th, td { border: 1px solid #dfe1e6; padding: 8px 12px; text-align: left; }
+th { background: #f4f5f7; }
+.note { background: #fffae6; border-left: 4px solid #ffab00; padding: 12px 16px; margin: 1em 0; }
+.ok { background: #e3fcef; border-left: 4px solid #00875a; padding: 12px 16px; margin: 1em 0; }
+.diagram { background: #f9f9f9; border: 1px solid #ddd; padding: 16px; font-family: monospace; white-space: pre; line-height: 1.4; }
+.tick { color: #00875a; font-weight: bold; }
+</style>
+</head>
+<body>
+
+<h1>rcmd — 像本地一样运行远程命令</h1>
+<p>在远程 <strong>telnet</strong> 或 <strong>ssh</strong> 设备上执行命令，就像在本地运行一样简单。为 AI 工具（Claude Code 的 Bash 工具）和人类使用而设计。</p>
+
+<h2>为什么做这个</h2>
+<p>让 AI「像本地一样」跑远程命令，真正的难点不是连接，而是三件事，现有工具各缺一环：</p>
+<table>
+<tr><th>方案</th><th>缺陷</th></tr>
+<tr><td><code>ssh host cmd</code></td><td>无状态 —— <code>cd</code>/环境变量跨调用不保留</td></tr>
+<tr><td><code>tmux send-keys</code></td><td>拿不到准确的命令边界和退出码</td></tr>
+<tr><td>telnet</td><td>没有干净的自动化方式（嵌入式设备常用）</td></tr>
+</table>
+<p><code>rcmd</code> 一次解决这三点：<strong>有状态</strong>、<strong>准确退出码</strong>、telnet/ssh <strong>统一接口</strong>。</p>
+
+<h2>架构</h2>
+<div class="diagram">
+调用方 ──▶ rcmd（瘦客户端，每次调用新进程）
+              │  Unix socket（长度前缀 JSON）
+              ▼
+          rcmd daemon（常驻后台）
+              ├─ session[board]  → pexpect telnet 长连接（有状态）
+              └─ session[server] → pexpect ssh 长连接（有状态）
+</div>
+<p>daemon 首次调用时自动启动，每个设备维持一个长生命周期的 shell，因此 <code>cd</code>、环境变量、后台状态在多次调用之间自然保留。</p>
+
+<h2>核心机制：哨兵法（sentinel）</h2>
+<p>telnet / 交互式 shell 没有天然的「命令结束」信号。rcmd 在每条命令后注入一个<strong>随机哨兵</strong>并回传 <code>$?</code>，从而精确判定命令边界与退出码：</p>
+<pre><code>发送：  &lt;用户命令&gt;
+        __rc=$?; echo ___RCMD_&lt;随机&gt;___:$__rc
+匹配：  ___RCMD_&lt;随机&gt;___:(\d+)     ← 括号里就是退出码，之前的内容 = 命令输出</code></pre>
+<p>哨兵单独一行发送（而非用 <code>;</code> 拼接），这样命令里的尾部 <code>#</code> 注释或未闭合引号都不会吞掉哨兵。<strong>telnet 和 ssh 用同一套逻辑</strong>，协议差异只在如何建立那个连接。</p>
+
+<h2>命令</h2>
+<table>
+<tr><th>命令</th><th>作用</th></tr>
+<tr><td><code>rcmd exec &lt;device&gt; "&lt;cmd&gt;"</code></td><td>在设备会话里运行命令，<strong>退出码透传</strong>（rcmd 自身退出码 == 远程命令退出码）</td></tr>
+<tr><td><code>rcmd ls</code></td><td>列出所有设备及连接状态</td></tr>
+<tr><td><code>rcmd reset &lt;device&gt;</code></td><td>断开并重连，清空会话状态（cd/env）</td></tr>
+<tr><td><code>rcmd raw &lt;device&gt; "&lt;keys&gt;"</code></td><td>发送原始按键（用于交互式程序，无退出码）</td></tr>
+<tr><td><code>rcmd logs &lt;device&gt; [n]</code></td><td>查看该会话最近 n 行原始 I/O（调试用）</td></tr>
+<tr><td><code>rcmd stop</code></td><td>停止 daemon</td></tr>
+</table>
+
+<h2>使用方法</h2>
+
+<h3>1. 安装依赖</h3>
+<pre><code>pip3 install --user pexpect   # 唯一依赖</code></pre>
+
+<h3>2. 配置设备</h3>
+<p>编辑 <code>devices.yaml</code>，描述每个设备如何连接：</p>
+<pre><code>board:
+  transport: telnet
+  host: 192.168.22.166
+  port: 23
+  username: root
+  password: ******
+  login_prompt: "login:"          # 等这个再发用户名
+  password_prompt: "[Pp]assword:" # 等这个再发密码
+  shell_prompt: "[#$]"            # shell 就绪的提示符提示
+
+server:
+  transport: ssh
+  host: 172.25.4.8
+  port: 22
+  username: song.yu
+  password: ******               # 该主机用密码认证；也可留空走 key</code></pre>
+
+<h3>3. 运行</h3>
+<pre><code>cd rcmd
+
+./rcmd exec server "uname -a"     # 退出码 = 远程命令退出码
+./rcmd exec board  "cd /tmp"      # 状态保留...
+./rcmd exec board  "pwd"          # ...下次生效 → /tmp
+./rcmd exec board  "false"; echo $?   # → 1，真实的远程退出码
+./rcmd ls                         # 查看设备与连接状态</code></pre>
+
+<h2>给 AI 调用者的说明</h2>
+<ul>
+<li><code>exec</code> 用于<strong>会正常返回</strong>的命令（有退出码）。它的退出码等于远程命令的退出码，判断成败的方式和本地命令一致。</li>
+<li><strong>交互式程序</strong>（<code>top</code>、<code>vi</code>、<code>tail -f</code>、需要输入的 <code>sudo</code>）不会产生哨兵，会<strong>超时</strong>（默认 30s，可用 <code>RCMD_TIMEOUT</code> 调整）。这类请用 <code>rcmd raw</code>，或避免使用。</li>
+<li>会话<strong>有状态</strong>：一次调用里的 <code>cd</code> 会影响下一次。需要干净 shell 时用 <code>rcmd reset &lt;device&gt;</code>。</li>
+<li>超时后 rcmd 会<strong>自动发送 Ctrl-C 并重新同步</strong>，下一条命令能正常工作，无需手动 reset。</li>
+</ul>
+
+<h2>配置字段参考（devices.yaml）</h2>
+<table>
+<tr><th>字段</th><th>telnet</th><th>ssh</th><th>含义</th></tr>
+<tr><td><code>transport</code></td><td class="tick">✓</td><td class="tick">✓</td><td><code>telnet</code> 或 <code>ssh</code></td></tr>
+<tr><td><code>host</code> / <code>port</code></td><td class="tick">✓</td><td class="tick">✓</td><td>地址与端口</td></tr>
+<tr><td><code>username</code></td><td class="tick">✓</td><td class="tick">✓</td><td>登录用户</td></tr>
+<tr><td><code>password</code></td><td class="tick">✓</td><td>○</td><td>telnet 必需；ssh 用它或用 key</td></tr>
+<tr><td><code>login_prompt</code></td><td class="tick">✓</td><td></td><td>发送用户名前等待的正则</td></tr>
+<tr><td><code>password_prompt</code></td><td>○</td><td>○</td><td>发送密码前等待的正则</td></tr>
+<tr><td><code>shell_prompt</code></td><td>○</td><td>○</td><td>交互 shell 的提示符正则（提示用）</td></tr>
+</table>
+<p>环境变量：<code>RCMD_CONFIG</code>（配置文件路径）、<code>RCMD_TIMEOUT</code>（每条命令超时秒数）。</p>
+
+<h2>已验证</h2>
+<div class="ok">
+已在真实环境全部通过测试：ssh（172.25.4.8，Ubuntu 20.04）与 telnet（Buildroot armv7l 嵌入式板）。
+</div>
+<table>
+<tr><th>能力</th><th>ssh</th><th>telnet</th></tr>
+<tr><td>命令执行 + 干净输出</td><td class="tick">✓</td><td class="tick">✓</td></tr>
+<tr><td>有状态（cd/env 跨调用保留）</td><td class="tick">✓</td><td class="tick">✓</td></tr>
+<tr><td>准确退出码透传（$?）</td><td class="tick">✓</td><td class="tick">✓</td></tr>
+<tr><td>多设备状态隔离（各自 cwd）</td><td class="tick">✓</td><td class="tick">✓</td></tr>
+<tr><td>管道 / 引号 / # 注释 / 算术</td><td class="tick">✓</td><td class="tick">✓</td></tr>
+<tr><td>超时后自动 Ctrl-C 恢复</td><td class="tick">✓</td><td class="tick">✓</td></tr>
+</table>
+
+<h2>技术栈</h2>
+<ul>
+<li><strong>语言：</strong>Python 3（单文件，daemon + 客户端）</li>
+<li><strong>交互控制：</strong><code>pexpect</code>（telnet/ssh 长连接与哨兵匹配）</li>
+<li><strong>通信：</strong>Unix domain socket（本机，长度前缀 JSON）</li>
+</ul>
+
+<h2>已知限制</h2>
+<ul>
+<li><code>exec</code> 只适用于会返回的命令；交互式程序需走 <code>raw</code>，否则超时。</li>
+<li>telnet 密码以明文存于 <code>devices.yaml</code>，注意文件权限（<code>chmod 600</code>）并加入 gitignore。</li>
+<li>目前一条命令在会话内串行执行；如需并发请为同一设备配置多个 device 名。</li>
+</ul>
+
+</body>
+</html>
