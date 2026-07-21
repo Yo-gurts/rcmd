@@ -387,7 +387,7 @@ def request(req, retries=1):
 
 
 def main(argv):
-    if not argv:
+    if not argv or argv[0] in ("-h", "--help", "help"):
         print(__doc__)
         return 0
     cmd = argv[0]
@@ -450,7 +450,7 @@ def main(argv):
         print(resp.get("output") or resp.get("error"))
         return 0 if resp.get("ok") else 3
 
-    sys.stderr.write("rcmd: unknown command %r\n" % cmd)
+    sys.stderr.write("rcmd: unknown command %r (try `rcmd --help`)\n" % cmd)
     return 2
 
 
