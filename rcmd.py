@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""rcmd - run commands on remote telnet/ssh devices as if they were local.
+"""rcmd - run commands on remote telnet/ssh/serial devices as if they were local.
 
 Architecture: a background daemon holds one persistent shell per device
-(via pexpect). The thin CLI client talks to it over a Unix socket. Command
-boundaries and exit codes are captured with a random sentinel echoed after
-each command, so `rcmd exec` returns the *real* remote exit status.
+(via pexpect for ssh/telnet, pyserial for serial). The thin CLI client talks
+to it over a socket (Unix socket on Linux/Mac, TCP localhost on Windows).
+Command boundaries and exit codes are captured with a random sentinel echoed
+after each command, so `rcmd exec` returns the *real* remote exit status.
+
+Transports:
+  - ssh     : pexpect spawn ssh (Linux/Mac only — pexpect needs Unix PTY)
+  - telnet  : pexpect spawn telnet (Linux/Mac only)
+  - serial  : pyserial direct (cross-platform, works on Windows)
 
 Usage:
     rcmd exec <device> "<command>"   run a command in the device's shell
@@ -28,12 +34,22 @@ import uuid
 
 HOME = os.path.expanduser("~")
 RUN_DIR = os.path.join(HOME, ".cache", "rcmd")
-SOCK_PATH = os.path.join(RUN_DIR, "rcmd.sock")
 LOG_PATH = os.path.join(RUN_DIR, "daemon.log")
 CONFIG_PATH = os.environ.get(
     "RCMD_CONFIG", os.path.join(os.path.dirname(os.path.abspath(__file__)), "devices.yaml")
 )
 DEFAULT_TIMEOUT = int(os.environ.get("RCMD_TIMEOUT", "30"))
+
+# --- Socket transport: use TCP on Windows, Unix socket elsewhere -----------
+IS_WINDOWS = sys.platform == "win32"
+if IS_WINDOWS:
+    SOCK_HOST = "127.0.0.1"
+    SOCK_PORT = int(os.environ.get("RCMD_PORT", "47321"))
+    SOCK_PATH = None
+else:
+    SOCK_PATH = os.path.join(RUN_DIR, "rcmd.sock")
+    SOCK_HOST = None
+    SOCK_PORT = None
 
 os.makedirs(RUN_DIR, exist_ok=True)
 
@@ -57,7 +73,6 @@ def load_config(path):
             else:
                 key, _, val = line.strip().partition(":")
                 val = val.strip()
-                # strip surrounding quotes and inline comments
                 if val and val[0] in "\"'":
                     q = val[0]
                     end = val.find(q, 1)
@@ -68,17 +83,56 @@ def load_config(path):
     return devices
 
 
+# --------------------------------------------------------------------------
+# Socket helpers — abstract over Unix socket vs TCP
+# --------------------------------------------------------------------------
+def make_server_socket():
+    """Create and bind the daemon's listening socket."""
+    if IS_WINDOWS:
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind((SOCK_HOST, SOCK_PORT))
+    else:
+        if os.path.exists(SOCK_PATH):
+            os.unlink(SOCK_PATH)
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(SOCK_PATH)
+    srv.listen(16)
+    return srv
+
+
+def make_client_socket():
+    """Create and connect a client socket to the daemon."""
+    if IS_WINDOWS:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((SOCK_HOST, SOCK_PORT))
+    else:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.connect(SOCK_PATH)
+    return sock
+
+
+def cleanup_socket():
+    """Remove the Unix socket file (no-op on Windows)."""
+    if not IS_WINDOWS and os.path.exists(SOCK_PATH):
+        try:
+            os.unlink(SOCK_PATH)
+        except Exception:
+            pass
+
+
 # ==========================================================================
-# DAEMON SIDE
+# SESSION: ssh / telnet  (pexpect-based, Linux/Mac only)
 # ==========================================================================
 class Session:
-    """One persistent remote shell for a single device."""
+    """One persistent remote shell for a single device (ssh/telnet)."""
 
     def __init__(self, name, cfg):
         self.name = name
         self.cfg = cfg
         self.child = None
         self.connected = False
+        self._raw_log = None
 
     def connect(self):
         import pexpect
@@ -97,73 +151,54 @@ class Session:
             raise ValueError("unknown transport: %s" % transport)
 
         child = pexpect.spawn(cmd, encoding="utf-8", timeout=DEFAULT_TIMEOUT, echo=False)
-        child.logfile_read = open(self._raw_log_path(), "a")
+        self._raw_log = open(self._raw_log_path(), "a")
+        child.logfile_read = self._raw_log
 
         login_prompt = cfg.get("login_prompt")
         password_prompt = cfg.get("password_prompt", "[Pp]assword:")
         shell_prompt = cfg.get("shell_prompt", "[#$]")
 
-        # --- authentication phase -------------------------------------------
-        # We can't assume password vs key auth, so wait for whichever comes
-        # first: a login/password prompt, or the shell itself.
         if transport == "telnet" and login_prompt:
             child.expect(login_prompt, timeout=20)
             child.sendline(cfg.get("username", ""))
 
         if cfg.get("password"):
-            # Race the password prompt against the shell prompt. If the shell
-            # shows up first (ssh key auth), skip sending a password.
             idx = child.expect([password_prompt, shell_prompt], timeout=20)
             if idx == 0:
                 child.sendline(cfg["password"])
 
-        # --- handshake phase ------------------------------------------------
-        # Don't trust the device's native prompt for command boundaries.
-        # Install a fixed PS1 and confirm with a one-shot ready token so we
-        # know exactly when the shell is ours, regardless of banners/colors.
+        self._handshake(child)
+        self.child = child
+        self.connected = True
+
+    def _handshake(self, child):
+        """Install a clean PS1, disable echo, sync on ready tokens."""
         ready = "RCMD_READY_%s" % uuid.uuid4().hex[:8]
         child.sendline(
             "export PS1='' PROMPT_COMMAND='' PAGER=cat GIT_PAGER=cat; "
             "stty -echo 2>/dev/null; echo %s" % ready
         )
         child.expect(ready + r"\r?\n", timeout=20)
-        # A second round-trip: echo is now off, so this token arrives with no
-        # command echo ahead of it. Sync on it to leave the buffer clean for
-        # the first real command.
         ready2 = "RCMD_SYNC_%s" % uuid.uuid4().hex[:8]
         child.sendline("echo %s" % ready2)
         child.expect(ready2 + r"\r?\n", timeout=20)
-        # Drain anything still buffered (banners, echoed handshake lines on
-        # shells that ignore stty -echo) so the first real command is clean.
         try:
             while True:
                 child.read_nonblocking(65536, timeout=0.3)
         except Exception:
             pass
-        self.child = child
-        self.connected = True
-
-    def _raw_log_path(self):
-        return os.path.join(RUN_DIR, "session-%s.log" % self.name)
 
     def exec(self, command, timeout=DEFAULT_TIMEOUT):
-        """Run one command, return (output, exit_code). Raises on timeout."""
         import pexpect
 
         if not self.connected:
             self.connect()
         marker = "___RCMD_%s___" % uuid.uuid4().hex[:12]
-        # Send the command, then the sentinel on a SEPARATE line. Appending
-        # after `;` on the same line breaks if the command ends in a `#`
-        # comment or an unterminated quote — a newline forces a clean boundary.
         self.child.sendline(command)
         self.child.sendline("__rc=$?; echo %s:$__rc" % marker)
         try:
             self.child.expect(r"%s:(\d+)" % marker, timeout=timeout)
         except pexpect.TIMEOUT:
-            # The command is still running and will keep polluting the shell.
-            # Send Ctrl-C to interrupt it, then resync so the *next* exec sees
-            # a clean prompt instead of leftover output.
             self._interrupt_and_resync()
             raise TimeoutError(
                 "command timed out after %ss (interactive program? use `rcmd raw`)"
@@ -171,12 +206,10 @@ class Session:
             )
         code = int(self.child.match.group(1))
         out = self.child.before
-        # Strip the echoed command line (first line) that the shell reflects.
         out = self._clean(out, command)
         return out, code
 
     def _interrupt_and_resync(self):
-        """Recover the shell after a timeout: interrupt, drain, confirm alive."""
         import pexpect
 
         try:
@@ -190,17 +223,13 @@ class Session:
             except Exception:
                 pass
         except (pexpect.TIMEOUT, pexpect.EOF, OSError):
-            # Shell is wedged; drop it so the next call reconnects fresh.
             self.close()
 
     def _clean(self, out, command):
         out = out.replace("\r", "")
         lines = out.split("\n")
-        # With stty -echo the command isn't echoed, but be defensive: drop a
-        # leading line that merely repeats the command we sent.
         if lines and command.strip() and lines[0].strip() == command.strip():
             lines = lines[1:]
-        # Drop leading blank lines introduced by the sendline newline.
         while lines and lines[0] == "":
             lines.pop(0)
         return "\n".join(lines).rstrip("\n")
@@ -215,15 +244,223 @@ class Session:
         except Exception:
             return ""
 
+    def _raw_log_path(self):
+        return os.path.join(RUN_DIR, "session-%s.log" % self.name)
+
     def close(self):
         if self.child:
             try:
                 self.child.close(force=True)
             except Exception:
                 pass
+        if self._raw_log:
+            try:
+                self._raw_log.close()
+            except Exception:
+                pass
         self.connected = False
 
 
+# ==========================================================================
+# SESSION: serial  (pyserial-based, cross-platform including Windows)
+# ==========================================================================
+class SerialSession:
+    """One persistent remote shell over a serial port (pyserial).
+
+    Uses the same sentinel mechanism as Session — the transport is the only
+    difference. Works on Windows, Linux, and Mac.
+    """
+
+    def __init__(self, name, cfg):
+        self.name = name
+        self.cfg = cfg
+        self.ser = None
+        self.connected = False
+        self._raw_log = None
+
+    def connect(self):
+        import serial
+
+        cfg = self.cfg
+        port = cfg["port"]
+        baud = int(cfg.get("baud", "115200"))
+
+        self.ser = serial.Serial(port, baud, timeout=0.05)
+        self._raw_log = open(self._raw_log_path(), "a")
+        time.sleep(0.5)
+
+        # Flush any pending data in the receive buffer (hardware-level clear)
+        self.ser.reset_input_buffer()
+
+        # Send a newline to provoke a prompt
+        self._write("\r\n")
+        time.sleep(1)
+        self.ser.reset_input_buffer()
+
+        # Same handshake as ssh/telnet: install clean PS1, disable echo, sync
+        self._handshake()
+        self.connected = True
+
+    def _write(self, text):
+        """Write text to the serial port and log it."""
+        data = text.encode()
+        self.ser.write(data)
+        if self._raw_log:
+            self._raw_log.write(data.decode(errors="replace"))
+            self._raw_log.flush()
+
+    def _read_until(self, pattern, timeout=20):
+        """Read from serial until regex pattern is found. Returns (before, match).
+
+        Uses blocking read(1024) with short timeout instead of polling
+        in_waiting — more reliable on Windows and avoids buffer overflow.
+        """
+        rx = re.compile(pattern)
+        buf = ""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            chunk = self.ser.read(1024)  # blocks up to timeout (50ms)
+            if chunk:
+                text = chunk.decode(errors="replace")
+                buf += text
+                if self._raw_log:
+                    self._raw_log.write(text)
+                    self._raw_log.flush()
+                m = rx.search(buf)
+                if m:
+                    before = buf[:m.start()]
+                    return before, m
+        raise TimeoutError("serial: timed out waiting for pattern %r after %ss" % (pattern, timeout))
+
+    def _drain(self, duration=0.5):
+        """Read and discard all pending data for a short duration."""
+        buf = ""
+        deadline = time.time() + duration
+        while time.time() < deadline:
+            chunk = self.ser.read(1024)
+            if chunk:
+                text = chunk.decode(errors="replace")
+                buf += text
+                if self._raw_log:
+                    self._raw_log.write(text)
+                    self._raw_log.flush()
+            else:
+                time.sleep(0.02)
+        return buf
+
+    def _handshake(self):
+        """Install a clean PS1, disable echo, sync on ready tokens.
+
+        Note: serial reattaches to the same shell (unlike ssh which spawns a
+        new one), so we explicitly cd ~ to give reset() a clean state.
+        """
+        ready = "RCMD_READY_%s" % uuid.uuid4().hex[:8]
+        self._write(
+            "cd ~; export PS1='' PROMPT_COMMAND='' PAGER=cat GIT_PAGER=cat; "
+            "stty -echo 2>/dev/null; echo %s\r" % ready
+        )
+        self._read_until(ready + r"\r?\n", timeout=20)
+
+        ready2 = "RCMD_SYNC_%s" % uuid.uuid4().hex[:8]
+        self._write("echo %s\r" % ready2)
+        self._read_until(ready2 + r"\r?\n", timeout=20)
+
+        # Clear any residual output (banners, echoed handshake lines)
+        self.ser.reset_input_buffer()
+
+    def exec(self, command, timeout=DEFAULT_TIMEOUT):
+        """Run one command, return (output, exit_code). Raises on timeout."""
+        if not self.connected:
+            self.connect()
+        # Clear hardware input buffer (instant, avoids read-timing race on Windows)
+        self.ser.reset_input_buffer()
+        marker = "___RCMD_%s___" % uuid.uuid4().hex[:12]
+        sentinel_cmd = "__rc=$?; echo %s:$__rc" % marker
+        # Send command + sentinel as a SINGLE write to avoid timing issues
+        self._write(command + "\r" + sentinel_cmd + "\r")
+        try:
+            before, m = self._read_until(r"%s:(\d+)" % marker, timeout=timeout)
+        except TimeoutError:
+            self._interrupt_and_resync()
+            raise TimeoutError(
+                "command timed out after %ss (interactive program? use `rcmd raw`)"
+                % timeout
+            )
+        code = int(m.group(1))
+        out = self._clean(before, command)
+        return out, code
+
+    def _interrupt_and_resync(self):
+        """Recover after a timeout: send Ctrl-C, resync, clear buffer."""
+        try:
+            self._write("\x03")  # Ctrl-C
+            time.sleep(0.3)
+            self.ser.reset_input_buffer()
+            sync = "RCMD_RESYNC_%s" % uuid.uuid4().hex[:8]
+            self._write("echo %s\r" % sync)
+            self._read_until(sync + r"\r?\n", timeout=5)
+            self.ser.reset_input_buffer()
+        except Exception:
+            self.close()
+
+    def _clean(self, out, command):
+        # Serial consoles often use \r or \r\n for line breaks, and stty -echo
+        # may not work, so the command and sentinel command are echoed back.
+        # Normalize line endings, then strip echoed command lines.
+        out = out.replace("\r\n", "\n").replace("\r", "\n")
+        lines = out.split("\n")
+        cleaned = []
+        for line in lines:
+            stripped = line.strip()
+            # Skip the echoed command line
+            if stripped == command.strip():
+                continue
+            # Skip the echoed sentinel command line
+            if stripped.startswith("__rc=$?; echo ___RCMD_"):
+                continue
+            cleaned.append(line)
+        # Remove leading blank lines
+        while cleaned and cleaned[0] == "":
+            cleaned.pop(0)
+        return "\n".join(cleaned).rstrip("\n")
+
+    def raw(self, keys):
+        if not self.connected:
+            self.connect()
+        self._write(keys)
+        time.sleep(0.5)
+        return self._drain(1.0)
+
+    def _raw_log_path(self):
+        return os.path.join(RUN_DIR, "session-%s.log" % self.name)
+
+    def close(self):
+        if self.ser:
+            try:
+                self.ser.close()
+            except Exception:
+                pass
+        if self._raw_log:
+            try:
+                self._raw_log.close()
+            except Exception:
+                pass
+        self.connected = False
+
+
+# ==========================================================================
+# Session factory — route to the right transport
+# ==========================================================================
+def create_session(name, cfg):
+    transport = cfg.get("transport", "ssh")
+    if transport == "serial":
+        return SerialSession(name, cfg)
+    return Session(name, cfg)
+
+
+# ==========================================================================
+# DAEMON
+# ==========================================================================
 class Daemon:
     def __init__(self):
         self.devices = load_config(CONFIG_PATH)
@@ -233,7 +470,7 @@ class Daemon:
         if name not in self.devices:
             raise KeyError("unknown device: %s" % name)
         if name not in self.sessions:
-            self.sessions[name] = Session(name, self.devices[name])
+            self.sessions[name] = create_session(name, self.devices[name])
         return self.sessions[name]
 
     def handle(self, req):
@@ -254,7 +491,7 @@ class Daemon:
                         {
                             "device": n,
                             "transport": c.get("transport"),
-                            "host": c.get("host"),
+                            "host": c.get("host") or c.get("port"),
                             "connected": bool(s and s.connected),
                         }
                     )
@@ -282,12 +519,8 @@ class Daemon:
             return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
 
     def serve(self):
-        if os.path.exists(SOCK_PATH):
-            os.unlink(SOCK_PATH)
-        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        srv.bind(SOCK_PATH)
-        srv.listen(16)
-        self._log("daemon listening on %s" % SOCK_PATH)
+        srv = make_server_socket()
+        self._log("daemon listening on %s" % ("TCP %s:%d" % (SOCK_HOST, SOCK_PORT) if IS_WINDOWS else SOCK_PATH))
         try:
             while True:
                 conn, _ = srv.accept()
@@ -309,8 +542,8 @@ class Daemon:
         finally:
             for s in self.sessions.values():
                 s.close()
-            if os.path.exists(SOCK_PATH):
-                os.unlink(SOCK_PATH)
+            srv.close()
+            cleanup_socket()
 
     def _log(self, msg):
         with open(LOG_PATH, "a") as f:
@@ -347,13 +580,14 @@ def _recv_n(conn, n):
 def ensure_daemon():
     if _try_ping():
         return
-    # spawn daemon detached
     subprocess.Popen(
         [sys.executable, os.path.abspath(__file__), "daemon"],
         stdout=open(LOG_PATH, "a"),
         stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
-        start_new_session=True,
+        # On Windows, CREATE_NEW_PROCESS_GROUP + DETACHED_PROCESS equivalent
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if IS_WINDOWS else 0,
+        start_new_session=not IS_WINDOWS,
     )
     for _ in range(50):
         if _try_ping():
@@ -371,10 +605,7 @@ def _try_ping():
 
 
 def request(req, retries=1):
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.connect(SOCK_PATH)
-    # Give the daemon its command timeout plus headroom to reply, so a slow
-    # remote command surfaces as a clean client-side error instead of hanging.
+    sock = make_client_socket()
     if req.get("action") in ("exec", "raw"):
         sock.settimeout(req.get("timeout", DEFAULT_TIMEOUT) + 10)
     try:
@@ -424,7 +655,7 @@ def main(argv):
         sys.stdout.write(resp["output"])
         if resp["output"] and not resp["output"].endswith("\n"):
             sys.stdout.write("\n")
-        return resp["exit_code"]  # propagate remote exit code
+        return resp["exit_code"]
 
     if cmd == "raw":
         device, keys = argv[1], argv[2]
