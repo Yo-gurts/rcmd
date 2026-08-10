@@ -2,7 +2,7 @@
 # 复制为 devices.yaml 并填入真实信息：cp devices.yaml.example devices.yaml
 # devices.yaml 已被 .gitignore 忽略，不会提交真实密码。
 #
-# Each device is a named remote shell target reached over telnet, ssh or serial.
+# Each device is a named remote shell target reached over telnet, ssh, serial or adb.
 # rcmd keeps one persistent shell per device so cd/env/state survive across calls.
 
 board:
@@ -29,3 +29,10 @@ serial_board:
   transport: serial
   port: COM3                        # Windows: COM3 / Linux: /dev/ttyUSB0
   baud: 115200                      # default 115200
+
+# Android device / board with adbd (embedded Linux with adb daemon)
+# Requires: adb in PATH (Android platform-tools)
+adb_board:
+  transport: adb
+  serial: 0123456789                # adb device serial (adb devices -l);
+                                    # omit to use the single connected device

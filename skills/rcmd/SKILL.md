@@ -1,11 +1,11 @@
 ---
 name: rcmd
-description: Run commands on remote telnet, ssh or serial devices (embedded boards, dev servers) with stateful sessions and accurate exit codes, via the `rcmd` CLI. Use whenever a task involves executing shell commands on a remote device over telnet/ssh/serial — inspecting logs, checking status, running scripts on a board or server. Prefer this over raw `ssh host cmd` (no state), `sshpass`, or `tmux send-keys` (no exit code). Devices are pre-configured by name in ~/rcmd/devices.yaml.
+description: Run commands on remote telnet, ssh, serial or adb devices (embedded boards, dev servers) with stateful sessions and accurate exit codes, via the `rcmd` CLI. Use whenever a task involves executing shell commands on a remote device over telnet/ssh/serial/adb — inspecting logs, checking status, running scripts on a board or server. Prefer this over raw `ssh host cmd` (no state), `sshpass`, or `tmux send-keys` (no exit code). Devices are pre-configured by name in ~/rcmd/devices.yaml.
 ---
 
-# rcmd — 远程 telnet/ssh 命令
+# rcmd — 远程 telnet/ssh/serial/adb 命令
 
-`rcmd` 让你在远程 telnet/ssh/serial 设备上跑命令，像本地一样：**有状态**（`cd`/env 跨调用保留）、**退出码准确透传**、telnet/ssh/serial **统一接口**。已在 `PATH` 中，直接调用 `rcmd`。
+`rcmd` 让你在远程 telnet/ssh/serial/adb 设备上跑命令，像本地一样：**有状态**（`cd`/env 跨调用保留）、**退出码准确透传**、telnet/ssh/serial/adb **统一接口**。已在 `PATH` 中，直接调用 `rcmd`。
 
 ## 何时用
 
@@ -45,6 +45,6 @@ rcmd exec board "test -f /etc/foo && echo yes"; echo $?
 
 ## 配置
 
-设备定义在 `~/rcmd/devices.yaml`（含密码，已 gitignore；模板见 `devices.yaml.example`）。加新设备就在该文件加一个命名块（transport/host/port/username/password，telnet 另需 login_prompt/password_prompt；serial 需 port/baud）。环境变量：`RCMD_TIMEOUT`（每条命令超时秒数）、`RCMD_CONFIG`（配置路径）。
+设备定义在 `~/rcmd/devices.yaml`（含密码，已 gitignore；模板见 `devices.yaml.example`）。加新设备就在该文件加一个命名块（transport/host/port/username/password，telnet 另需 login_prompt/password_prompt；serial 需 port/baud；adb 需 serial）。环境变量：`RCMD_TIMEOUT`（每条命令超时秒数）、`RCMD_CONFIG`（配置路径）。
 
 仓库：`git@github.com:Yo-gurts/rcmd.git`。

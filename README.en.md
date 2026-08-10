@@ -1,10 +1,10 @@
 # rcmd — run remote commands like local
 
-Run commands on remote **telnet**, **ssh** or **serial** devices as if they
-were local. One persistent shell per device keeps `cd` / env / state across
-calls, and every `exec` returns the **real remote exit code**. Built for AI
-tools (call it from the Bash tool) and humans alike. Works on Linux and
-Windows.
+Run commands on remote **telnet**, **ssh**, **serial** or **adb** devices as if
+they were local. One persistent shell per device keeps `cd` / env / state
+across calls, and every `exec` returns the **real remote exit code**. Built
+for AI tools (call it from the Bash tool) and humans alike. Works on Linux
+and Windows.
 
 ## Why
 
@@ -15,7 +15,7 @@ codes, and telnet has no clean automation at all. `rcmd` solves all three:
 - **Accurate** — a random sentinel echoed after each command marks the exact
   command boundary and carries `$?`, so `rcmd`'s own exit code == the remote
   command's exit code.
-- **Uniform** — telnet, ssh and serial all look identical to the caller.
+- **Uniform** — telnet, ssh, serial and adb all look identical to the caller.
 
 ## Architecture
 
@@ -26,7 +26,8 @@ codes, and telnet has no clean automation at all. `rcmd` solves all three:
              rcmd daemon (persistent)
                  ├─ session[board]       → pexpect telnet shell   (stateful)
                  ├─ session[server]      → pexpect ssh shell       (stateful)
-                 └─ session[serial_board]→ pyserial UART shell     (stateful)
+                 ├─ session[serial_board]→ pyserial UART shell     (stateful)
+                 └─ session[adb_board]   → adb shell pipe          (stateful)
 ```
 
 The daemon auto-starts on first use. Command boundary + exit code:
@@ -44,12 +45,17 @@ pip3 install --user pyserial         # required for serial transport
 cp devices.yaml.example devices.yaml # then edit with your real hosts
 ```
 
-On **Windows**, `pexpect` is unavailable so only `serial` transport works;
-the daemon automatically uses a TCP localhost socket instead of a Unix socket.
+The **adb** transport needs `adb` in your `PATH` (Android platform-tools);
+no Python dependency required.
+
+On **Windows**, `pexpect` is unavailable so only `serial` and `adb`
+transports work; the daemon automatically uses a TCP localhost socket instead
+of a Unix socket.
 
 Edit `devices.yaml` to describe your devices (telnet needs login/password
-prompts; ssh needs user + password or key auth; serial needs port + baud).
-`devices.yaml` is gitignored so your credentials never get committed.
+prompts; ssh needs user + password or key auth; serial needs port + baud;
+adb needs the device serial). `devices.yaml` is gitignored so your
+credentials never get committed.
 
 Optionally add `~/rcmd` to your `PATH` so you can call `rcmd` from anywhere:
 
@@ -87,6 +93,7 @@ Examples:
 ./rcmd exec board  "pwd"          # ...persists → /tmp
 ./rcmd exec board  "false"; echo $?   # → 1, real remote exit code
 ./rcmd exec serial_board "df -h"  # serial console works the same way
+./rcmd exec adb_board "uname -a"  # adb device works the same way
 ```
 
 ## Notes for AI callers
@@ -105,16 +112,17 @@ Examples:
 
 ## Config reference (`devices.yaml`)
 
-| key             | telnet | ssh | serial | meaning                                   |
-|-----------------|:------:|:---:|:------:|-------------------------------------------|
-| `transport`     |   ✓    |  ✓  |   ✓    | `telnet`, `ssh` or `serial`               |
-| `host` / `port` |   ✓    |  ✓  |        | network address                           |
-| `username`      |   ✓    |  ✓  |        | login user                                |
-| `password`      |   ✓    |  ○  |        | required for telnet; ssh uses it or a key |
-| `login_prompt`  |   ✓    |     |        | regex awaited before sending username     |
-| `password_prompt`|  ○    |  ○  |        | regex awaited before sending password     |
-| `shell_prompt`  |   ○    |  ○  |        | regex hint for the interactive shell      |
-| `port` (serial) |        |     |   ✓    | serial device path (COM3 / /dev/ttyUSB0)  |
-| `baud` (serial) |        |     |   ○    | baud rate, default 115200                 |
+| key            | telnet | ssh | serial | adb | meaning                                   |
+|----------------|:------:|:---:|:------:|:---:|-------------------------------------------|
+| `transport`    |   ✓    |  ✓  |   ✓    |  ✓  | `telnet`, `ssh`, `serial` or `adb`        |
+| `host` / `port`|   ✓    |  ✓  |        |     | network address                           |
+| `username`     |   ✓    |  ✓  |        |     | login user                                |
+| `password`     |   ✓    |  ○  |        |     | required for telnet; ssh uses it or a key |
+| `login_prompt` |   ✓    |     |        |     | regex awaited before sending username     |
+| `password_prompt`|  ○   |  ○  |        |     | regex awaited before sending password     |
+| `shell_prompt` |   ○    |  ○  |        |     | regex hint for the interactive shell      |
+| `port` (serial)|        |     |   ✓    |     | serial device path (COM3 / /dev/ttyUSB0)  |
+| `baud` (serial)|        |     |   ○    |     | baud rate, default 115200                 |
+| `serial` (adb) |        |     |        |  ○  | adb device serial (`adb devices -l`); omit to use the single device |
 
 Env: `RCMD_CONFIG` (config path), `RCMD_TIMEOUT` (per-command seconds).

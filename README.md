@@ -1,6 +1,6 @@
 # rcmd — 像本地命令一样远程执行
 
-在远程 **telnet**、**ssh** 或 **serial** 设备上执行命令，就像在本地一样。
+在远程 **telnet**、**ssh**、**serial** 或 **adb** 设备上执行命令，就像在本地一样。
 每个设备保持一个持久 shell，`cd` / env / 状态跨调用保留，每次 `exec`
 都返回**真实的远程退出码**。为 AI 工具（可从 Bash 工具调用）和人类用户
 设计。支持 Linux 和 Windows。
@@ -13,7 +13,7 @@ telnet 更是完全没有干净的自动化方案。`rcmd` 一次性解决这三
 - **有状态** — daemon 为每个设备持有长期存活的 shell。
 - **准确** — 每条命令后回显一个随机哨兵标记命令边界并携带 `$?`，
   因此 `rcmd` 自身的退出码 == 远程命令的退出码。
-- **统一** — telnet、ssh、serial 对调用方完全一致。
+- **统一** — telnet、ssh、serial、adb 对调用方完全一致。
 
 ## 架构
 
@@ -24,7 +24,8 @@ telnet 更是完全没有干净的自动化方案。`rcmd` 一次性解决这三
              rcmd daemon (persistent)
                  ├─ session[board]       → pexpect telnet shell   (有状态)
                  ├─ session[server]      → pexpect ssh shell       (有状态)
-                 └─ session[serial_board]→ pyserial UART shell     (有状态)
+                 ├─ session[serial_board]→ pyserial UART shell     (有状态)
+                 └─ session[adb_board]   → adb shell pipe          (有状态)
 ```
 
 daemon 首次使用时自动启动。命令边界 + 退出码机制：
@@ -42,11 +43,13 @@ pip3 install --user pyserial         # serial 传输需要
 cp devices.yaml.example devices.yaml # 然后编辑填入真实设备
 ```
 
-**Windows** 上 `pexpect` 不可用，因此只支持 `serial` 传输；daemon 会自动
+**adb** 传输需要 `adb` 在你的 `PATH`（Android platform-tools），无需 Python 依赖。
+
+**Windows** 上 `pexpect` 不可用，因此只支持 `serial` 和 `adb` 传输；daemon 会自动
 使用 TCP localhost socket 替代 Unix socket。
 
 编辑 `devices.yaml` 描述你的设备（telnet 需要 login/password 提示符；
-ssh 需要用户 + 密码或密钥认证；serial 需要 port + baud）。
+ssh 需要用户 + 密码或密钥认证；serial 需要 port + baud；adb 需要 serial）。
 `devices.yaml` 已被 gitignore，凭据永远不会被提交。
 
 可选：把 `~/rcmd` 加入 `PATH`，即可在任何地方调用 `rcmd`：
@@ -85,6 +88,7 @@ ln -s "$PWD/skills/rcmd" ~/.claude/skills/rcmd   # 或 cp -r
 ./rcmd exec board  "pwd"          # ...保留 → /tmp
 ./rcmd exec board  "false"; echo $?   # → 1，真实的远程退出码
 ./rcmd exec serial_board "df -h"  # 串口控制台用法完全相同
+./rcmd exec adb_board "uname -a"  # adb 设备用法完全相同
 ```
 
 ## AI 调用方注意事项
@@ -101,17 +105,18 @@ ln -s "$PWD/skills/rcmd" ~/.claude/skills/rcmd   # 或 cp -r
 
 ## 配置参考（`devices.yaml`）
 
-| key             | telnet | ssh | serial | 含义                                      |
-|-----------------|:------:|:---:|:------:|-------------------------------------------|
-| `transport`     |   ✓    |  ✓  |   ✓    | `telnet`、`ssh` 或 `serial`               |
-| `host` / `port` |   ✓    |  ✓  |        | 网络地址                                  |
-| `username`      |   ✓    |  ✓  |        | 登录用户                                  |
-| `password`      |   ✓    |  ○  |        | telnet 必需；ssh 用它或走密钥             |
-| `login_prompt`  |   ✓    |     |        | 发送用户名前等待的正则提示符              |
-| `password_prompt`|  ○    |  ○  |        | 发送密码前等待的正则提示符                |
-| `shell_prompt`  |   ○    |  ○  |        | 交互 shell 就绪的正则提示符               |
-| `port` (serial) |        |     |   ✓    | 串口设备路径（COM3 / /dev/ttyUSB0）       |
-| `baud` (serial) |        |     |   ○    | 波特率，默认 115200                       |
+| key            | telnet | ssh | serial | adb | 含义                                      |
+|----------------|:------:|:---:|:------:|:---:|-------------------------------------------|
+| `transport`    |   ✓    |  ✓  |   ✓    |  ✓  | `telnet`、`ssh`、`serial` 或 `adb`       |
+| `host` / `port`|   ✓    |  ✓  |        |     | 网络地址                                  |
+| `username`     |   ✓    |  ✓  |        |     | 登录用户                                  |
+| `password`     |   ✓    |  ○  |        |     | telnet 必需；ssh 用它或走密钥             |
+| `login_prompt` |   ✓    |     |        |     | 发送用户名前等待的正则提示符              |
+| `password_prompt`|  ○   |  ○  |        |     | 发送密码前等待的正则提示符                |
+| `shell_prompt` |   ○    |  ○  |        |     | 交互 shell 就绪的正则提示符               |
+| `port` (serial)|        |     |   ✓    |     | 串口设备路径（COM3 / /dev/ttyUSB0）       |
+| `baud` (serial)|        |     |   ○    |     | 波特率，默认 115200                       |
+| `serial` (adb) |        |     |        |  ○  | adb 设备序列号（`adb devices -l`）；可省略取唯一设备 |
 
 环境变量：`RCMD_CONFIG`（配置路径）、`RCMD_TIMEOUT`（每条命令超时秒数）。
 

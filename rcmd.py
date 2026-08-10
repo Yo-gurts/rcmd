@@ -11,6 +11,7 @@ Transports:
   - ssh     : pexpect spawn ssh (Linux/Mac only — pexpect needs Unix PTY)
   - telnet  : pexpect spawn telnet (Linux/Mac only)
   - serial  : pyserial direct (cross-platform, works on Windows)
+  - adb     : `adb shell` subprocess pipe (cross-platform)
 
 Usage:
     rcmd exec <device> "<command>"   run a command in the device's shell
@@ -25,10 +26,12 @@ The client auto-spawns the daemon on first use.
 """
 import json
 import os
+import queue
 import re
 import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -449,12 +452,239 @@ class SerialSession:
 
 
 # ==========================================================================
+# SESSION: adb  (subprocess pipe to `adb shell`, cross-platform)
+# ==========================================================================
+class AdbSession:
+    """One persistent remote shell over `adb shell` (subprocess pipe).
+
+    Unlike a serial/TTY transport, `adb shell` without -t is a *pipe*: no
+    PTY, so commands must end with \\n (not \\r) and stty -echo has no effect.
+    We keep a persistent `adb -s <serial> shell` process and drive it with a
+    reader thread + queue. The same sentinel mechanism gives us accurate
+    exit codes and stateful sessions (cd persists across calls).
+
+    Requires: adb in PATH (Android platform-tools).
+    """
+
+    def __init__(self, name, cfg):
+        self.name = name
+        self.cfg = cfg
+        self.proc = None
+        self.q = None
+        self.connected = False
+        self._raw_log = None
+
+    # -- helpers ----------------------------------------------------------
+
+    def _adb_base(self):
+        """['adb', '-s', serial] or ['adb'] if no serial configured."""
+        serial = self.cfg.get("serial") or self.cfg.get("device")
+        if serial:
+            return ["adb", "-s", serial]
+        return ["adb"]
+
+    def _write(self, text):
+        """Write text to the adb shell stdin and log it."""
+        if not self.proc or not self.proc.stdin:
+            raise RuntimeError("adb shell not connected")
+        self.proc.stdin.write(text.encode())
+        self.proc.stdin.flush()
+        if self._raw_log:
+            self._raw_log.write(text)
+            self._raw_log.flush()
+
+    def _read_until(self, pattern, timeout=20):
+        """Read from the queue until regex pattern is found.
+
+        Returns (before, match). Chunks may arrive split arbitrarily, so we
+        accumulate into a buffer and search the whole buffer each time.
+        """
+        rx = re.compile(pattern)
+        buf = ""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                chunk = self.q.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if chunk is None:  # EOF — adb shell exited
+                raise EOFError("adb shell closed unexpectedly")
+            buf += chunk
+            if self._raw_log:
+                self._raw_log.write(chunk)
+                self._raw_log.flush()
+            m = rx.search(buf)
+            if m:
+                before = buf[:m.start()]
+                return before, m
+        raise TimeoutError(
+            "adb: timed out waiting for pattern %r after %ss" % (pattern, timeout)
+        )
+
+    def _drain(self, duration=0.5):
+        """Read and discard all pending output for a short duration."""
+        buf = ""
+        deadline = time.time() + duration
+        while time.time() < deadline:
+            try:
+                chunk = self.q.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if chunk is None:
+                break
+            buf += chunk
+            if self._raw_log:
+                self._raw_log.write(chunk)
+                self._raw_log.flush()
+        return buf
+
+    # -- lifecycle --------------------------------------------------------
+
+    def connect(self):
+        if self.connected:
+            return
+        cmd = self._adb_base() + ["shell"]
+        self.proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=0,
+        )
+        self._raw_log = open(self._raw_log_path(), "a")
+        self.q = queue.Queue()
+
+        def reader():
+            while True:
+                chunk = self.proc.stdout.read(1024)
+                if not chunk:
+                    self.q.put(None)
+                    break
+                self.q.put(chunk.decode(errors="replace"))
+
+        threading.Thread(target=reader, daemon=True).start()
+
+        # Drain boot banner / initial prompt, then handshake
+        time.sleep(0.5)
+        self._drain(0.5)
+        self._handshake()
+        self.connected = True
+
+    def _handshake(self):
+        """Install clean PS1, sync on ready tokens (pipe: \\n line endings)."""
+        ready = "RCMD_READY_%s" % uuid.uuid4().hex[:8]
+        self._write(
+            "export PS1='' PROMPT_COMMAND='' PAGER=cat GIT_PAGER=cat; "
+            "cd ~; echo %s\n" % ready
+        )
+        self._read_until(ready + r"\r*\n", timeout=20)
+
+        ready2 = "RCMD_SYNC_%s" % uuid.uuid4().hex[:8]
+        self._write("echo %s\n" % ready2)
+        self._read_until(ready2 + r"\r*\n", timeout=20)
+
+        self._drain(0.5)
+
+    def exec(self, command, timeout=DEFAULT_TIMEOUT):
+        """Run one command, return (output, exit_code). Raises on timeout."""
+        if not self.connected:
+            self.connect()
+        # Drain residual output so we don't match a stale sentinel
+        self._drain(0.3)
+        marker = "___RCMD_%s___" % uuid.uuid4().hex[:12]
+        sentinel_cmd = "__rc=$?; echo %s:$__rc" % marker
+        # Single write: command + sentinel, \n terminated (adb shell is a pipe)
+        self._write(command + "\n" + sentinel_cmd + "\n")
+        try:
+            before, m = self._read_until(r"%s:(\d+)" % marker, timeout=timeout)
+        except (TimeoutError, EOFError):
+            self._interrupt_and_resync()
+            raise TimeoutError(
+                "command timed out after %ss (interactive program? use `rcmd raw`)"
+                % timeout
+            )
+        code = int(m.group(1))
+        out = self._clean(before, command)
+        return out, code
+
+    def _interrupt_and_resync(self):
+        """Recover after a timeout: Ctrl-C, resync, drain."""
+        try:
+            self._write("\x03")
+            time.sleep(0.3)
+            self._drain(0.5)
+            sync = "RCMD_RESYNC_%s" % uuid.uuid4().hex[:8]
+            self._write("echo %s\n" % sync)
+            self._read_until(sync + r"\r*\n", timeout=5)
+            self._drain(0.3)
+        except Exception:
+            self.close()
+
+    def _clean(self, out, command):
+        # adb shell pipe echoes the command line(s); strip them like serial.
+        # adb emits \r\r\n line endings — normalize to \n, collapse blank runs.
+        out = out.replace("\r\r\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
+        lines = out.split("\n")
+        cleaned = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped == command.strip():
+                continue
+            if re.match(r"^__rc=\$?; echo ___RCMD_", stripped) or "___RCMD_" in stripped:
+                continue
+            # Skip prompt remnants like "/ #" or "root@host:/#"
+            if re.match(r"^/?[^ ]* ?[#$>] $", stripped) or stripped in ("/ #", "#", "$"):
+                continue
+            cleaned.append(stripped)
+        # Drop leading/trailing/consecutive blank lines
+        while cleaned and cleaned[0] == "":
+            cleaned.pop(0)
+        while cleaned and cleaned[-1] == "":
+            cleaned.pop()
+        result = []
+        for line in cleaned:
+            if line == "" and result and result[-1] == "":
+                continue
+            result.append(line)
+        return "\n".join(result)
+
+    def raw(self, keys):
+        if not self.connected:
+            self.connect()
+        self._write(keys)
+        time.sleep(0.5)
+        return self._drain(1.0)
+
+    def _raw_log_path(self):
+        return os.path.join(RUN_DIR, "session-%s.log" % self.name)
+
+    def close(self):
+        if self.proc:
+            try:
+                self.proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                self.proc.terminate()
+            except Exception:
+                pass
+        if self._raw_log:
+            try:
+                self._raw_log.close()
+            except Exception:
+                pass
+        self.connected = False
+
+
+# ==========================================================================
 # Session factory — route to the right transport
 # ==========================================================================
 def create_session(name, cfg):
     transport = cfg.get("transport", "ssh")
     if transport == "serial":
         return SerialSession(name, cfg)
+    if transport == "adb":
+        return AdbSession(name, cfg)
     return Session(name, cfg)
 
 
