@@ -509,6 +509,9 @@ class AdbSession:
                 continue
             if chunk is None:  # EOF — adb shell exited
                 raise EOFError("adb shell closed unexpectedly")
+            # Null bytes from device-tree/files can glue output to the echoed
+            # sentinel line; drop them so line parsing stays clean.
+            chunk = chunk.replace("\x00", "")
             buf += chunk
             if self._raw_log:
                 self._raw_log.write(chunk)
@@ -623,14 +626,21 @@ class AdbSession:
     def _clean(self, out, command):
         # adb shell pipe echoes the command line(s); strip them like serial.
         # adb emits \r\r\n line endings — normalize to \n, collapse blank runs.
+        # Output may be glued to the echoed sentinel line by \r or \x00 — cut
+        # everything from the echoed "__rc=$?; echo ___RCMD_..." marker onward.
         out = out.replace("\r\r\n", "\n").replace("\r\n", "\n").replace("\r", "\n")
+        idx = out.find("__rc=$?; echo ___RCMD_")
+        if idx != -1:
+            out = out[:idx]
         lines = out.split("\n")
         cleaned = []
         for line in lines:
             stripped = line.strip()
             if stripped == command.strip():
                 continue
-            if re.match(r"^__rc=\$?; echo ___RCMD_", stripped) or "___RCMD_" in stripped:
+            # Drop any line carrying sentinel remnants (echoed command, partial
+            # markers glued by \r, or ":$__rc" tails)
+            if "___RCMD_" in stripped or stripped.endswith(":$__rc") or re.match(r"^__rc=\$?; echo", stripped):
                 continue
             # Skip prompt remnants like "/ #" or "root@host:/#"
             if re.match(r"^/?[^ ]* ?[#$>] $", stripped) or stripped in ("/ #", "#", "$"):
