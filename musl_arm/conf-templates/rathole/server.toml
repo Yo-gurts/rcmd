@@ -1,0 +1,31 @@
+# ===== rathole 服务端配置模板 (跑在公网服务器上) =====
+# 一份 server.toml 管理所有设备。每台设备的每个转发口 = 一条 [server.services.*]。
+# 启动:  ./rathole server.toml
+#
+# 端口规划约定 (改成你自己的):
+#   设备A:  ssh -> 10022    telnet -> 10122
+#   设备B:  ssh -> 10023    telnet -> 10123
+#   设备C:  ssh -> 10024    telnet -> 10124
+# 访问:  ssh -p 10022 root@<公网IP>   /   telnet <公网IP> 10122
+
+[server]
+bind_addr = "0.0.0.0:2333"          # 设备端连进来的控制端口 (客户端 remote_addr 要对上)
+default_token = "CHANGE_ME_到复杂随机串"   # 所有设备共用的认证 token；也可每个 service 单独覆盖
+
+# ---- 设备A ----
+[server.services.devA_ssh]
+bind_addr = "0.0.0.0:10022"         # 公网:10022 -> 设备A 的 ssh(22)
+
+[server.services.devA_telnet]
+bind_addr = "0.0.0.0:10122"         # 公网:10122 -> 设备A 的 telnet(23)
+
+# ---- 设备B (复制上面，改名字和端口) ----
+[server.services.devB_ssh]
+bind_addr = "0.0.0.0:10023"
+
+[server.services.devB_telnet]
+bind_addr = "0.0.0.0:10123"
+
+# ---- 更多设备照抄 ----
+# [server.services.devC_ssh]
+# bind_addr = "0.0.0.0:10024"

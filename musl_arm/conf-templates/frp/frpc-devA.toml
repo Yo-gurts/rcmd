@@ -1,0 +1,34 @@
+# ===== frp 板端配置模板 (跑在嵌入式设备上，用本目录的 frpc 二进制) =====
+# 每台设备一份。复制后改 serverAddr、每个 proxy 的 name (全局唯一) 和 remotePort。
+# 启动:  ./frpc -c frpc-devA.toml
+#
+# 端口规划约定 (改成你自己的):
+#   设备A:  ssh -> 10022    telnet -> 10122
+#   设备B:  ssh -> 10023    telnet -> 10123
+# 访问:  ssh -p 10022 root@<公网IP>   /   telnet <公网IP> 10122
+
+serverAddr = "CHANGE_ME_公网IP"
+serverPort = 7000                   # 和 frps.toml 的 bindPort 一致
+auth.token = "CHANGE_ME_和frps一致的token"
+
+[[proxies]]
+name = "devA-ssh"                   # 全局唯一，别的设备不能重名
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 22                      # 本设备 ssh 端口
+remotePort = 10022                  # 公网暴露端口
+
+[[proxies]]
+name = "devA-telnet"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 23                      # 本设备 telnet 端口
+remotePort = 10122
+
+# 转发别的口就再加一段 [[proxies]]，比如 web 配置页:
+# [[proxies]]
+# name = "devA-web"
+# type = "tcp"
+# localIP = "127.0.0.1"
+# localPort = 80
+# remotePort = 10222

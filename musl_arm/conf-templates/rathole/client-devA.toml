@@ -1,0 +1,21 @@
+# ===== rathole 板端配置模板 (跑在嵌入式设备上) =====
+# 每台设备一份。复制这个文件，把 remote_addr 改成你的服务器，
+# 把 services 下的名字 (devA_ssh/devA_telnet) 换成本设备对应的名字,
+# 名字必须和服务器 server.toml 里的 [server.services.*] 完全一致。
+# 启动:  ./rathole client-devA.toml
+# 断线会自动指数退避重连，无需额外脚本。
+
+[client]
+remote_addr = "CHANGE_ME_公网IP:2333"      # 服务器公网IP + server.toml 的 bind_addr 端口
+default_token = "CHANGE_ME_和server一致的token"
+
+[client.services.devA_ssh]
+local_addr = "127.0.0.1:22"                # 本设备 ssh。dropbear/openssh 监听的端口
+
+[client.services.devA_telnet]
+local_addr = "127.0.0.1:23"                # 本设备 telnet。telnetd 监听的端口
+
+# 需要转发其它 TCP 口就再加，比如板子的 web 配置页:
+# [client.services.devA_web]
+# local_addr = "127.0.0.1:80"
+# (记得在 server.toml 也加对应的 [server.services.devA_web] 并分配一个公网端口)

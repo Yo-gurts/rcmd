@@ -1,0 +1,22 @@
+# ===== frp 服务端配置模板 (跑在公网服务器上，需要 frps 二进制) =====
+# frps 是服务端，和板端的 frpc 配套。这里只有一份 frps.toml，管所有设备。
+# 启动:  ./frps -c frps.toml
+#
+# 列出在线设备:
+#   浏览器打开  http://<公网IP>:7500  (用下面的 user/password 登录)，看所有在线 proxy
+#   或 API:  curl http://admin:PASSWORD@<公网IP>:7500/api/proxy/tcp
+
+bindPort = 7000                     # 设备端 frpc 连进来的控制端口
+
+# ---- Web dashboard (列出在线设备) ----
+webServer.addr = "0.0.0.0"
+webServer.port = 7500
+webServer.user = "admin"
+webServer.password = "CHANGE_ME_dashboard密码"
+
+# ---- 认证 (所有 frpc 要用同一个 token) ----
+auth.method = "token"
+auth.token = "CHANGE_ME_到复杂随机串"
+
+# 说明: frp 的端口映射写在【板端 frpc.toml 的 remotePort】里，服务端这里不用逐个列。
+# frps 会按各 frpc 声明的 remotePort 自动监听。端口规划见 frpc-devA.toml。
