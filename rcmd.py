@@ -24,6 +24,7 @@ Usage:
 
 The client auto-spawns the daemon on first use.
 """
+import base64
 import json
 import os
 import queue
@@ -147,7 +148,8 @@ class Session:
         elif transport == "ssh":
             cmd = (
                 "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-                "-o LogLevel=ERROR -p %s %s@%s"
+                "-o LogLevel=ERROR -o ServerAliveInterval=15 -o ServerAliveCountMax=4 "
+                "-p %s %s@%s"
                 % (cfg.get("port", "22"), cfg["username"], cfg["host"])
             )
         else:
@@ -194,8 +196,21 @@ class Session:
     def exec(self, command, timeout=DEFAULT_TIMEOUT):
         import pexpect
 
-        if not self.connected:
+        try:
+            if not self.connected:
+                self.connect()
+            return self._exec_once(command, timeout)
+        except (pexpect.EOF, OSError, ConnectionError):
+            # Stale session (idle-disconnect / tunnel drop / remote reboot):
+            # reconnect once and retry the command — callers shouldn't need to
+            # know about `rcmd reset`.
+            self.close()
             self.connect()
+            return self._exec_once(command, timeout)
+
+    def _exec_once(self, command, timeout):
+        import pexpect
+
         marker = "___RCMD_%s___" % uuid.uuid4().hex[:12]
         self.child.sendline(command)
         self.child.sendline("__rc=$?; echo %s:$__rc" % marker)
@@ -246,6 +261,44 @@ class Session:
             return self.child.read_nonblocking(65536, timeout=1).replace("\r", "")
         except Exception:
             return ""
+
+    def _scp(self, src, dst):
+        """Run scp with the device's host/port/auth; retries without -O on old scp."""
+        base = ["scp", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+                "-o", "LogLevel=ERROR"]
+        if self.cfg.get("port", "22") != "22":
+            base += ["-P", self.cfg.get("port")]
+        # Password auth: scp prompts on a TTY, which subprocess can't answer.
+        # Wrap with sshpass when the tool is available (key auth needs no wrap).
+        if self.cfg.get("password"):
+            from shutil import which
+            if which("sshpass"):
+                base = ["sshpass", "-p", self.cfg["password"]] + base
+        for extra in (["-O"], []):  # -O = legacy scp protocol; old clients lack it
+            try:
+                r = subprocess.run(base + extra + [src, dst], capture_output=True, text=True, timeout=300)
+                if r.returncode == 0:
+                    return
+                err = (r.stderr or r.stdout or "").strip()
+                if "unknown option" not in err or not extra:
+                    raise RuntimeError("scp failed: %s" % err)
+            except subprocess.TimeoutExpired:
+                raise RuntimeError("scp timed out")
+        raise RuntimeError("scp failed")
+
+    def push(self, local_path, remote_path):
+        """Copy a local file to the device via scp (ssh transport only)."""
+        if self.cfg.get("transport", "ssh") != "ssh":
+            raise ValueError("push over %s transport not supported" % self.cfg.get("transport"))
+        self._scp(local_path, "%s@%s:%s" % (self.cfg["username"], self.cfg["host"], remote_path))
+        return "pushed %s -> %s:%s" % (local_path, self.name, remote_path)
+
+    def pull(self, remote_path, local_path):
+        """Copy a file from the device via scp (ssh transport only)."""
+        if self.cfg.get("transport", "ssh") != "ssh":
+            raise ValueError("pull over %s transport not supported" % self.cfg.get("transport"))
+        self._scp("%s@%s:%s" % (self.cfg["username"], self.cfg["host"], remote_path), local_path)
+        return "pulled %s:%s -> %s" % (self.name, remote_path, local_path)
 
     def _raw_log_path(self):
         return os.path.join(RUN_DIR, "session-%s.log" % self.name)
@@ -668,6 +721,23 @@ class AdbSession:
     def _raw_log_path(self):
         return os.path.join(RUN_DIR, "session-%s.log" % self.name)
 
+    def _adb_cmd(self, args):
+        """Run `adb [-s serial] <args>`; raise on failure with adb's output."""
+        r = subprocess.run(self._adb_base() + args, capture_output=True, text=True, timeout=300)
+        if r.returncode != 0:
+            raise RuntimeError("adb failed: %s" % (r.stderr or r.stdout).strip())
+        return (r.stdout or "").strip()
+
+    def push(self, local_path, remote_path):
+        """adb push (native file transfer)."""
+        return self._adb_cmd(["push", local_path, remote_path]) or \
+            "pushed %s -> %s:%s" % (local_path, self.name, remote_path)
+
+    def pull(self, remote_path, local_path):
+        """adb pull (native file transfer)."""
+        return self._adb_cmd(["pull", remote_path, local_path]) or \
+            "pulled %s:%s -> %s" % (self.name, remote_path, local_path)
+
     def close(self):
         if self.proc:
             try:
@@ -723,6 +793,12 @@ class Daemon:
             if action == "raw":
                 sess = self.get_session(req["device"])
                 return {"ok": True, "output": sess.raw(req["command"])}
+            if action == "push":
+                sess = self.get_session(req["device"])
+                return {"ok": True, "output": sess.push(req["local"], req["remote"])}
+            if action == "pull":
+                sess = self.get_session(req["device"])
+                return {"ok": True, "output": sess.pull(req["remote"], req["local"])}
             if action == "ls":
                 items = []
                 for n, c in self.devices.items():
@@ -878,15 +954,18 @@ def main(argv):
 
     if cmd == "exec":
         if len(argv) < 3:
-            sys.stderr.write("usage: rcmd exec <device> <command>\n")
+            sys.stderr.write("usage: rcmd exec <device> <command> [-t <seconds>]\n")
             return 2
         device, command = argv[1], argv[2]
+        timeout = DEFAULT_TIMEOUT
+        if "-t" in argv[3:]:
+            timeout = int(argv[argv.index("-t") + 1])
         resp = request(
             {
                 "action": "exec",
                 "device": device,
                 "command": command,
-                "timeout": DEFAULT_TIMEOUT,
+                "timeout": timeout,
             }
         )
         if not resp.get("ok"):
@@ -896,6 +975,28 @@ def main(argv):
         if resp["output"] and not resp["output"].endswith("\n"):
             sys.stdout.write("\n")
         return resp["exit_code"]
+
+    if cmd == "push":
+        if len(argv) < 4:
+            sys.stderr.write("usage: rcmd push <device> <local> <remote>\n")
+            return 2
+        resp = request({"action": "push", "device": argv[1], "local": argv[2], "remote": argv[3]})
+        if not resp.get("ok"):
+            sys.stderr.write("rcmd: %s\n" % resp.get("error"))
+            return 3
+        print(resp["output"])
+        return 0
+
+    if cmd == "pull":
+        if len(argv) < 4:
+            sys.stderr.write("usage: rcmd pull <device> <remote> <local>\n")
+            return 2
+        resp = request({"action": "pull", "device": argv[1], "remote": argv[2], "local": argv[3]})
+        if not resp.get("ok"):
+            sys.stderr.write("rcmd: %s\n" % resp.get("error"))
+            return 3
+        print(resp["output"])
+        return 0
 
     if cmd == "raw":
         device, keys = argv[1], argv[2]

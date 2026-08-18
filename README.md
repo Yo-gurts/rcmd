@@ -73,6 +73,9 @@ ln -s "$PWD/skills/rcmd" ~/.claude/skills/rcmd   # 或 cp -r
 
 ```bash
 ./rcmd exec <device> "<command>"   # 执行命令；退出码透传
+./rcmd exec <device> "<cmd>" -t 60 # 指定单命令超时（秒，默认 30）
+./rcmd push <device> <local> <remote>   # 推文件到设备（ssh/scp；密码认证自动走 sshpass）
+./rcmd pull <device> <remote> <local>   # 从设备拉文件
 ./rcmd ls                          # 列出设备 + 连接状态
 ./rcmd reset <device>              # 断开并重连（清除 cd/env）
 ./rcmd raw <device> "<keys>"       # 发送原始按键（无退出码）
@@ -89,7 +92,12 @@ ln -s "$PWD/skills/rcmd" ~/.claude/skills/rcmd   # 或 cp -r
 ./rcmd exec board  "false"; echo $?   # → 1，真实的远程退出码
 ./rcmd exec serial_board "df -h"  # 串口控制台用法完全相同
 ./rcmd exec adb_board "uname -a"  # adb 设备用法完全相同
+./rcmd push board ./fw.bin /mnt/data/fw.bin   # 传文件不再需要手敲 sshpass+scp
 ```
+
+**断连自愈**：ssh 会话带 `ServerAliveInterval=15` keepalive；exec 遇到
+连接被断（闲置断开、隧道抖动、设备重启）会自动重连并**重试当前命令**，
+调用方一般无需手动 `reset`。
 
 ## AI 调用方注意事项
 
