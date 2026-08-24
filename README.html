@@ -57,6 +57,8 @@ th { background: #f4f5f7; }
 <table>
 <tr><th>命令</th><th>作用</th></tr>
 <tr><td><code>rcmd exec &lt;device&gt; "&lt;cmd&gt;"</code></td><td>在设备会话里运行命令，<strong>退出码透传</strong>（rcmd 自身退出码 == 远程命令退出码）</td></tr>
+<tr><td><code>rcmd push &lt;device&gt; &lt;local&gt; &lt;remote&gt;</code></td><td>推文件到设备（ssh/scp；密码认证自动走 sshpass）</td></tr>
+<tr><td><code>rcmd pull &lt;device&gt; &lt;remote&gt; &lt;local&gt;</code></td><td>从设备拉文件</td></tr>
 <tr><td><code>rcmd ls</code></td><td>列出所有设备及连接状态</td></tr>
 <tr><td><code>rcmd reset &lt;device&gt;</code></td><td>断开并重连，清空会话状态（cd/env）</td></tr>
 <tr><td><code>rcmd raw &lt;device&gt; "&lt;keys&gt;"</code></td><td>发送原始按键（用于交互式程序，无退出码）</td></tr>
@@ -95,6 +97,7 @@ server:
 ./rcmd exec board  "cd /tmp"      # 状态保留...
 ./rcmd exec board  "pwd"          # ...下次生效 → /tmp
 ./rcmd exec board  "false"; echo $?   # → 1，真实的远程退出码
+./rcmd push board ./fw.bin /mnt/data/fw.bin   # 传文件不再需要手敲 sshpass+scp
 ./rcmd ls                         # 查看设备与连接状态</code></pre>
 
 <h3>4. 安装 AI skill（可选）</h3>

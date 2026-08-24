@@ -15,6 +15,8 @@ Transports:
 
 Usage:
     rcmd exec <device> "<command>"   run a command in the device's shell
+    rcmd push <device> <local> <remote>   copy a local file to the device
+    rcmd pull <device> <remote> <local>   copy a file from the device
     rcmd ls                          list devices and session state
     rcmd reset <device>              drop and reconnect the session
     rcmd raw <device> "<keys>"       send raw keystrokes (no exit code)

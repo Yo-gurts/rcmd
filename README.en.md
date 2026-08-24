@@ -78,6 +78,9 @@ ln -s "$PWD/skills/rcmd" ~/.claude/skills/rcmd   # or cp -r
 
 ```bash
 ./rcmd exec <device> "<command>"   # run a command; exit code propagates
+./rcmd exec <device> "<cmd>" -t 60 # set per-command timeout (seconds, default 30)
+./rcmd push <device> <local> <remote>   # push a file to the device (ssh/scp; password auth uses sshpass)
+./rcmd pull <device> <remote> <local>   # pull a file from the device
 ./rcmd ls                          # list devices + connection state
 ./rcmd reset <device>              # drop & reconnect (clears cd/env)
 ./rcmd raw <device> "<keys>"       # send raw keystrokes (no exit code)
@@ -94,6 +97,7 @@ Examples:
 ./rcmd exec board  "false"; echo $?   # → 1, real remote exit code
 ./rcmd exec serial_board "df -h"  # serial console works the same way
 ./rcmd exec adb_board "uname -a"  # adb device works the same way
+./rcmd push board ./fw.bin /mnt/data/fw.bin   # no more hand-typing sshpass+scp
 ```
 
 ## Notes for AI callers
