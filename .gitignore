@@ -9,6 +9,9 @@ __pycache__/
 .vscode/
 .idea/
 
+# 临时调试脚本
+*.sh
+
 # 编辑器交换/临时文件
 *.swp
 *.swo
