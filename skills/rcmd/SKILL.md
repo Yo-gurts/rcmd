@@ -49,7 +49,16 @@ rcmd exec board "test -f /etc/foo && echo yes"; echo $?
 
 ## 上手流程
 
-`rcmd` 默认在「`rcmd` 可执行所在目录 / 其链接目标的同目录」找 `devices.yaml`。**先 `rcmd ls` 试一次**：
+**首次使用先确认 `rcmd` 在 `PATH` 中**（`which rcmd`）。若 `command not found`，用软链装到 `~/.local/bin/`（该目录通常已在 `PATH`；不在则往 `~/.bashrc` 加 `export PATH=$HOME/.local/bin:$PATH`）：
+
+```bash
+ln -sf /data/song.yu/cvitek_agent/tools/rcmd/rcmd.py ~/.local/bin/rcmd
+grep -q '.local/bin' ~/.bashrc || echo 'export PATH=$HOME/.local/bin:$PATH' >> ~/.bashrc
+```
+
+软链指向 `rcmd.py` 本体时，`rcmd` 按脚本 realpath 解析回 `tools/rcmd/`，能自动找到同目录的 `devices.yaml`，**无需带 `RCMD_CONFIG` 前缀**。
+
+`rcmd` 默认在「`rcmd` 可执行所在目录 / 其链接目标的同目录」找 `devices.yaml`。**再 `rcmd ls` 试一次**：
 
 - **正常出设备清单** → 直接用。
 - **报配置目录错误**（如 `无法查找 rcmd 配置文件夹：... not a directory`）→ `rcmd` 解析到一个不在配置目录的链接（典型情况：经 `PATH` 链到 `/usr/bin/rcmd`）。这时**每次调用前都显式带 `RCMD_CONFIG=<devices.yaml 的路径>`**（如 cvitek_agent 仓库里的 `tools/rcmd/devices.yaml`）；别指望某次 `export` 能被后续 Bash 调用记住——shell 环境不持久，把前缀绑在每条命令上。
