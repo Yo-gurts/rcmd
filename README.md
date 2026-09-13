@@ -1,6 +1,6 @@
 # rcmd — 像本地命令一样远程执行
 
-在远程 **telnet**、**ssh**、**serial** 或 **adb** 设备上执行命令，就像在本地一样。
+在远程 **telnet**、**ssh**、**serial**、**serial_bridge** 或 **adb** 设备上执行命令，就像在本地一样。
 每个设备保持一个持久 shell，`cd` / env / 状态跨调用保留，每次 `exec`
 都返回**真实的远程退出码**。为 AI 工具（可从 Bash 工具调用）和人类用户
 设计。支持 Linux 和 Windows。
@@ -22,11 +22,18 @@ telnet 更是完全没有干净的自动化方案。`rcmd` 一次性解决这三
                  │  socket: AF_UNIX 或 AF_INET (Windows 上用 TCP localhost)
                  ▼
              rcmd daemon (persistent)
-                 ├─ session[board]       → pexpect telnet shell   (有状态)
-                 ├─ session[server]      → pexpect ssh shell       (有状态)
-                 ├─ session[serial_board]→ pyserial UART shell     (有状态)
-                 └─ session[adb_board]   → adb shell pipe          (有状态)
+                 ├─ session[board]        → pexpect telnet shell         (有状态)
+                 ├─ session[server]       → pexpect ssh shell            (有状态)
+                 ├─ session[serial_board] → pyserial UART shell          (有状态)
+                 ├─ session[bridge_board] → serial-bridge WebSocket 网关 (有状态)
+                 └─ session[adb_board]    → adb shell pipe               (有状态)
 ```
+
+`serial_bridge` 传输把串口放到**另一台主机**上：那台机器跑
+[serial-bridge](https://github.com/Yo-gurts/serial-bridge) 网关独占 UART 并用
+WebSocket 暴露，rcmd 连过去，就能像操作本地串口一样操作它。适合 rcmd 跑在
+服务器、而设备 UART 插在 Windows/另一台机器上的场景。它复用 `serial` 的整套
+哨兵机制，只是底层换成了 WebSocket。
 
 daemon 首次使用时自动启动。命令边界 + 退出码机制：
 
@@ -40,6 +47,7 @@ expect: ___RCMD_<rand>___:(\d+)      # \d+ 即退出码；前面的文本是输�
 ```bash
 pip3 install --user pexpect          # telnet/ssh 需要（Linux）
 pip3 install --user pyserial         # serial 传输需要
+pip3 install --user websocket-client # serial_bridge 传输需要
 cp devices.yaml.example devices.yaml # 然后编辑填入真实设备
 ```
 
@@ -91,6 +99,7 @@ ln -s "$PWD/skills/rcmd" ~/.claude/skills/rcmd   # 或 cp -r
 ./rcmd exec board  "pwd"          # ...保留 → /tmp
 ./rcmd exec board  "false"; echo $?   # → 1，真实的远程退出码
 ./rcmd exec serial_board "df -h"  # 串口控制台用法完全相同
+./rcmd exec bridge_board "df -h"  # 经 serial-bridge 网关的串口，用法也完全相同
 ./rcmd exec adb_board "uname -a"  # adb 设备用法完全相同
 ./rcmd push board ./fw.bin /mnt/data/fw.bin   # 传文件不再需要手敲 sshpass+scp
 ```
@@ -113,20 +122,27 @@ ln -s "$PWD/skills/rcmd" ~/.claude/skills/rcmd   # 或 cp -r
 
 ## 配置参考（`devices.yaml`）
 
-| key            | telnet | ssh | serial | adb | 含义                                      |
-|----------------|:------:|:---:|:------:|:---:|-------------------------------------------|
-| `transport`    |   ✓    |  ✓  |   ✓    |  ✓  | `telnet`、`ssh`、`serial` 或 `adb`       |
-| `host` / `port`|   ✓    |  ✓  |        |     | 网络地址                                  |
-| `username`     |   ✓    |  ✓  |        |     | 登录用户                                  |
-| `password`     |   ✓    |  ○  |        |     | telnet 必需；ssh 用它或走密钥             |
-| `login_prompt` |   ✓    |     |        |     | 发送用户名前等待的正则提示符              |
-| `password_prompt`|  ○   |  ○  |        |     | 发送密码前等待的正则提示符                |
-| `shell_prompt` |   ○    |  ○  |        |     | 交互 shell 就绪的正则提示符               |
-| `port` (serial)|        |     |   ✓    |     | 串口设备路径（COM3 / /dev/ttyUSB0）       |
-| `baud` (serial)|        |     |   ○    |     | 波特率，默认 115200                       |
-| `serial` (adb) |        |     |        |  ○  | adb 设备序列号（`adb devices -l`）；可省略取唯一设备 |
+| key            | telnet | ssh | serial | serial_bridge | adb | 含义                                      |
+|----------------|:------:|:---:|:------:|:-------------:|:---:|-------------------------------------------|
+| `transport`    |   ✓    |  ✓  |   ✓    |       ✓       |  ✓  | `telnet`、`ssh`、`serial`、`serial_bridge` 或 `adb` |
+| `host` / `port`|   ✓    |  ✓  |        |               |     | 网络地址                                  |
+| `username`     |   ✓    |  ✓  |        |               |     | 登录用户                                  |
+| `password`     |   ✓    |  ○  |        |               |     | telnet 必需；ssh 用它或走密钥             |
+| `login_prompt` |   ✓    |     |        |               |     | 发送用户名前等待的正则提示符              |
+| `password_prompt`|  ○   |  ○  |        |               |     | 发送密码前等待的正则提示符                |
+| `shell_prompt` |   ○    |  ○  |        |               |     | 交互 shell 就绪的正则提示符               |
+| `port`         |        |     |   ✓    |       ✓       |     | serial：本地串口路径（COM3 / /dev/ttyUSB0）；serial_bridge：**网关那台机器上的** COM 口 |
+| `baud`         |        |     |   ○    |       ○       |     | 波特率，默认 115200                       |
+| `url`          |        |     |        |       ✓       |     | serial-bridge 网关 WebSocket 地址（`ws://host:port/ws`） |
+| `token`        |        |     |        |       ○       |     | 网关 `--token`；网关免密时可省略          |
+| `serial` (adb) |        |     |        |               |  ○  | adb 设备序列号（`adb devices -l`）；可省略取唯一设备 |
 
 环境变量：`RCMD_CONFIG`（配置路径）、`RCMD_TIMEOUT`（每条命令超时秒数）。
+
+> **serial_bridge 前提**：另一台主机需运行 [serial-bridge](https://github.com/Yo-gurts/serial-bridge)
+> 网关（`python server.py --host 0.0.0.0 --token <token>`），rcmd 侧
+> `pip install websocket-client`。串口是独占的——网关侧若已有别的客户端
+> （如浏览器 UI）开着同一个口，rcmd 打开时会因端口占用失败。
 
 ---
 

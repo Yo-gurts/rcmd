@@ -1,11 +1,13 @@
 ---
 name: rcmd
-description: Run commands on remote telnet, ssh, serial or adb devices (embedded boards, dev servers) with stateful sessions, accurate exit codes, and file push/pull, via the `rcmd` CLI. Use whenever a task involves executing shell commands on a remote device over telnet/ssh/serial/adb — inspecting logs, checking status, deploying or replacing binaries on a board, running scripts on a board or server. Prefer this over raw `ssh host cmd` (no state), `sshpass`, or `tmux send-keys` (no exit code). Devices are pre-configured by name in devices.yaml; the skill ships alongside the rcmd tool.
+description: Run commands on remote telnet, ssh, serial, serial_bridge or adb devices (embedded boards, dev servers) with stateful sessions, accurate exit codes, and file push/pull, via the `rcmd` CLI. Use whenever a task involves executing shell commands on a remote device over telnet/ssh/serial/serial_bridge/adb — inspecting logs, checking status, deploying or replacing binaries on a board, running scripts on a board or server. serial_bridge reaches a serial console exposed over a serial-bridge WebSocket gateway on another host. Prefer this over raw `ssh host cmd` (no state), `sshpass`, or `tmux send-keys` (no exit code). Devices are pre-configured by name in devices.yaml; the skill ships alongside the rcmd tool.
 ---
 
-# rcmd — 远程 telnet/ssh/serial/adb 命令 + 文件传输
+# rcmd — 远程 telnet/ssh/serial/serial_bridge/adb 命令 + 文件传输
 
-`rcmd` 让你在远程 telnet/ssh/serial/adb 设备上跑命令、传文件，像本地一样：**有状态**（`cd`/env 跨调用保留）、**退出码准确透传**、四种传输方式**统一接口**。已在 `PATH` 中，直接调用 `rcmd`。
+`rcmd` 让你在远程 telnet/ssh/serial/serial_bridge/adb 设备上跑命令、传文件，像本地一样：**有状态**（`cd`/env 跨调用保留）、**退出码准确透传**、多种传输方式**统一接口**。已在 `PATH` 中，直接调用 `rcmd`。
+
+其中 `serial_bridge` 用于串口挂在**另一台主机**上的情况：那台机器跑 [serial-bridge](https://github.com/Yo-gurts/serial-bridge) 网关(独占 UART、WebSocket 暴露)，rcmd 连过去操作，用法与本地 `serial` 完全一致(需 `pip install websocket-client`；串口独占，网关侧若已有客户端占着同一口，rcmd 打开会失败)。
 
 **约定（cvitek_agent 项目）：在目标设备上执行任何命令一律走 `rcmd`，绝不用裸 `ssh`/`sshpass` 跑命令。** 这是被纠正过的强约束。
 

@@ -1,6 +1,7 @@
 # rcmd — run remote commands like local
 
-Run commands on remote **telnet**, **ssh**, **serial** or **adb** devices as if
+Run commands on remote **telnet**, **ssh**, **serial**, **serial_bridge** or
+**adb** devices as if
 they were local. One persistent shell per device keeps `cd` / env / state
 across calls, and every `exec` returns the **real remote exit code**. Built
 for AI tools (call it from the Bash tool) and humans alike. Works on Linux
@@ -15,7 +16,8 @@ codes, and telnet has no clean automation at all. `rcmd` solves all three:
 - **Accurate** — a random sentinel echoed after each command marks the exact
   command boundary and carries `$?`, so `rcmd`'s own exit code == the remote
   command's exit code.
-- **Uniform** — telnet, ssh, serial and adb all look identical to the caller.
+- **Uniform** — telnet, ssh, serial, serial_bridge and adb all look identical
+  to the caller.
 
 ## Architecture
 
@@ -24,11 +26,19 @@ codes, and telnet has no clean automation at all. `rcmd` solves all three:
                  │  socket: AF_UNIX or AF_INET (TCP localhost on Windows)
                  ▼
              rcmd daemon (persistent)
-                 ├─ session[board]       → pexpect telnet shell   (stateful)
-                 ├─ session[server]      → pexpect ssh shell       (stateful)
-                 ├─ session[serial_board]→ pyserial UART shell     (stateful)
-                 └─ session[adb_board]   → adb shell pipe          (stateful)
+                 ├─ session[board]        → pexpect telnet shell        (stateful)
+                 ├─ session[server]       → pexpect ssh shell           (stateful)
+                 ├─ session[serial_board] → pyserial UART shell         (stateful)
+                 ├─ session[bridge_board] → serial-bridge WebSocket gw  (stateful)
+                 └─ session[adb_board]    → adb shell pipe              (stateful)
 ```
+
+The `serial_bridge` transport puts the serial port on **another host**: that
+machine runs the [serial-bridge](https://github.com/Yo-gurts/serial-bridge)
+gateway (owns the UART, exposes it over WebSocket) and rcmd connects to it —
+handy when rcmd runs on a server but the device's UART is attached to a
+Windows / other machine. It reuses the whole `serial` sentinel machinery, only
+the underlying byte pipe is a WebSocket.
 
 The daemon auto-starts on first use. Command boundary + exit code:
 
@@ -42,15 +52,16 @@ expect: ___RCMD_<rand>___:(\d+)      # \d+ is the exit code; text before = outpu
 ```bash
 pip3 install --user pexpect          # required for telnet/ssh (Linux)
 pip3 install --user pyserial         # required for serial transport
+pip3 install --user websocket-client # required for serial_bridge transport
 cp devices.yaml.example devices.yaml # then edit with your real hosts
 ```
 
 The **adb** transport needs `adb` in your `PATH` (Android platform-tools);
 no Python dependency required.
 
-On **Windows**, `pexpect` is unavailable so only `serial` and `adb`
-transports work; the daemon automatically uses a TCP localhost socket instead
-of a Unix socket.
+On **Windows**, `pexpect` is unavailable so only `serial`, `serial_bridge` and
+`adb` transports work; the daemon automatically uses a TCP localhost socket
+instead of a Unix socket.
 
 Edit `devices.yaml` to describe your devices (telnet needs login/password
 prompts; ssh needs user + password or key auth; serial needs port + baud;
@@ -96,6 +107,7 @@ Examples:
 ./rcmd exec board  "pwd"          # ...persists → /tmp
 ./rcmd exec board  "false"; echo $?   # → 1, real remote exit code
 ./rcmd exec serial_board "df -h"  # serial console works the same way
+./rcmd exec bridge_board "df -h"  # serial over a serial-bridge gateway, same way
 ./rcmd exec adb_board "uname -a"  # adb device works the same way
 ./rcmd push board ./fw.bin /mnt/data/fw.bin   # no more hand-typing sshpass+scp
 ```
@@ -116,17 +128,26 @@ Examples:
 
 ## Config reference (`devices.yaml`)
 
-| key            | telnet | ssh | serial | adb | meaning                                   |
-|----------------|:------:|:---:|:------:|:---:|-------------------------------------------|
-| `transport`    |   ✓    |  ✓  |   ✓    |  ✓  | `telnet`, `ssh`, `serial` or `adb`        |
-| `host` / `port`|   ✓    |  ✓  |        |     | network address                           |
-| `username`     |   ✓    |  ✓  |        |     | login user                                |
-| `password`     |   ✓    |  ○  |        |     | required for telnet; ssh uses it or a key |
-| `login_prompt` |   ✓    |     |        |     | regex awaited before sending username     |
-| `password_prompt`|  ○   |  ○  |        |     | regex awaited before sending password     |
-| `shell_prompt` |   ○    |  ○  |        |     | regex hint for the interactive shell      |
-| `port` (serial)|        |     |   ✓    |     | serial device path (COM3 / /dev/ttyUSB0)  |
-| `baud` (serial)|        |     |   ○    |     | baud rate, default 115200                 |
-| `serial` (adb) |        |     |        |  ○  | adb device serial (`adb devices -l`); omit to use the single device |
+| key            | telnet | ssh | serial | serial_bridge | adb | meaning                                   |
+|----------------|:------:|:---:|:------:|:-------------:|:---:|-------------------------------------------|
+| `transport`    |   ✓    |  ✓  |   ✓    |       ✓       |  ✓  | `telnet`, `ssh`, `serial`, `serial_bridge` or `adb` |
+| `host` / `port`|   ✓    |  ✓  |        |               |     | network address                           |
+| `username`     |   ✓    |  ✓  |        |               |     | login user                                |
+| `password`     |   ✓    |  ○  |        |               |     | required for telnet; ssh uses it or a key |
+| `login_prompt` |   ✓    |     |        |               |     | regex awaited before sending username     |
+| `password_prompt`|  ○   |  ○  |        |               |     | regex awaited before sending password     |
+| `shell_prompt` |   ○    |  ○  |        |               |     | regex hint for the interactive shell      |
+| `port`         |        |     |   ✓    |       ✓       |     | serial: local device path (COM3 / /dev/ttyUSB0); serial_bridge: the COM port **on the gateway host** |
+| `baud`         |        |     |   ○    |       ○       |     | baud rate, default 115200                 |
+| `url`          |        |     |        |       ✓       |     | serial-bridge gateway WebSocket (`ws://host:port/ws`) |
+| `token`        |        |     |        |       ○       |     | gateway `--token`; omit if the gateway is token-free  |
+| `serial` (adb) |        |     |        |               |  ○  | adb device serial (`adb devices -l`); omit to use the single device |
+
+> **serial_bridge prerequisite**: another host runs the
+> [serial-bridge](https://github.com/Yo-gurts/serial-bridge) gateway
+> (`python server.py --host 0.0.0.0 --token <token>`), and rcmd side has
+> `pip install websocket-client`. Serial ports are exclusive — if the gateway
+> already has another client (e.g. the browser UI) holding the same port,
+> rcmd's open will fail as busy.
 
 Env: `RCMD_CONFIG` (config path), `RCMD_TIMEOUT` (per-command seconds).

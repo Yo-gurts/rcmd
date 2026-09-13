@@ -8,10 +8,13 @@ Command boundaries and exit codes are captured with a random sentinel echoed
 after each command, so `rcmd exec` returns the *real* remote exit status.
 
 Transports:
-  - ssh     : pexpect spawn ssh (Linux/Mac only — pexpect needs Unix PTY)
-  - telnet  : pexpect spawn telnet (Linux/Mac only)
-  - serial  : pyserial direct (cross-platform, works on Windows)
-  - adb     : `adb shell` subprocess pipe (cross-platform)
+  - ssh           : pexpect spawn ssh (Linux/Mac only — pexpect needs Unix PTY)
+  - telnet        : pexpect spawn telnet (Linux/Mac only)
+  - serial        : pyserial direct (cross-platform, works on Windows)
+  - serial_bridge : serial over a serial-bridge WebSocket gateway (the serial
+                    port lives on another host running serial-bridge; needs
+                    `pip install websocket-client`)
+  - adb           : `adb shell` subprocess pipe (cross-platform)
 
 Usage:
     rcmd exec <device> "<command>"   run a command in the device's shell
@@ -344,6 +347,14 @@ class SerialSession:
         baud = int(cfg.get("baud", "115200"))
 
         self.ser = serial.Serial(port, baud, timeout=0.05)
+        self._provision()
+
+    def _provision(self):
+        """Post-open setup shared by serial and serial_bridge transports.
+
+        Assumes self.ser is a pyserial-like object exposing read()/write()/
+        reset_input_buffer()/close(). Provokes a prompt and runs the handshake.
+        """
         self._raw_log = open(self._raw_log_path(), "a")
         time.sleep(0.5)
 
@@ -504,6 +515,141 @@ class SerialSession:
             except Exception:
                 pass
         self.connected = False
+
+
+# ==========================================================================
+# SESSION: serial_bridge  (serial over a serial-bridge WebSocket gateway)
+# ==========================================================================
+class _BridgeSerial:
+    """pyserial-like adapter backed by a serial-bridge WebSocket gateway.
+
+    Exposes exactly the subset SerialSession touches — write(bytes),
+    read(n)->bytes, reset_input_buffer(), close() — so SerialBridgeSession can
+    reuse all of SerialSession's sentinel/handshake/exec logic unchanged.
+
+    Protocol (serial-bridge): connect ws://host:port/ws?token=..., send
+    {"type":"open","port","baudrate"} to open the port, receive device output
+    as {"type":"rx","hex"/"text"}, send bytes as {"type":"tx","data":<hex>,
+    "encoding":"hex"}. tx-echo frames (our own writes, broadcast back) are
+    ignored so they don't duplicate the device's own echo.
+
+    Requires: pip install websocket-client
+    """
+
+    def __init__(self, url, token, port, baud, timeout=0.05):
+        import websocket  # websocket-client
+
+        self.timeout = timeout
+        self._buf = bytearray()
+        self._cond = threading.Condition()
+        self._send_lock = threading.Lock()
+        self._closed = False
+        self.open_error = None
+
+        full = url
+        if token:
+            full += ("&" if "?" in full else "?") + "token=" + token
+        self._ws = websocket.create_connection(full, timeout=10)
+
+        self._reader = threading.Thread(target=self._read_loop, daemon=True)
+        self._reader.start()
+        # Open the serial port on the gateway
+        self._send_json({"type": "open", "port": port, "baudrate": int(baud)})
+
+    def _send_json(self, obj):
+        with self._send_lock:
+            self._ws.send(json.dumps(obj))
+
+    def _read_loop(self):
+        while not self._closed:
+            try:
+                raw = self._ws.recv()
+            except Exception:
+                break
+            if not raw:
+                continue
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            t = msg.get("type")
+            if t == "rx":
+                hexs = (msg.get("hex") or "").replace(" ", "")
+                try:
+                    data = bytes.fromhex(hexs) if hexs else (msg.get("text") or "").encode(errors="replace")
+                except ValueError:
+                    data = (msg.get("text") or "").encode(errors="replace")
+                with self._cond:
+                    self._buf.extend(data)
+                    self._cond.notify_all()
+            elif t == "status" and msg.get("error"):
+                self.open_error = msg["error"]
+            # tx echo and clean status frames are ignored
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
+
+    def write(self, data):
+        if isinstance(data, str):
+            data = data.encode()
+        # hex encoding is binary-safe over the JSON protocol
+        self._send_json({"type": "tx", "data": data.hex(), "encoding": "hex"})
+
+    def read(self, n=1):
+        deadline = time.time() + (self.timeout or 0)
+        with self._cond:
+            while not self._buf and not self._closed:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                self._cond.wait(remaining)
+            if not self._buf:
+                return b""
+            chunk = bytes(self._buf[:n])
+            del self._buf[:n]
+            return chunk
+
+    def reset_input_buffer(self):
+        with self._cond:
+            self._buf.clear()
+
+    def close(self):
+        self._closed = True
+        try:
+            self._ws.close()
+        except Exception:
+            pass
+
+
+class SerialBridgeSession(SerialSession):
+    """Serial console reached over a serial-bridge WebSocket gateway.
+
+    The physical serial port lives on another host running serial-bridge
+    (https://github.com/Yo-gurts/serial-bridge). This connects to that
+    gateway's WebSocket, opens the port remotely, then reuses SerialSession's
+    entire sentinel/handshake/exec machinery via the _BridgeSerial adapter.
+
+    Config keys: url (ws://host:port/ws), token (optional), port (COM port on
+    the gateway), baud (default 115200).
+    Requires: pip install websocket-client
+    """
+
+    def connect(self):
+        cfg = self.cfg
+        url = cfg.get("url")
+        if not url:
+            raise ValueError("serial_bridge device needs 'url' (ws://host:port/ws)")
+        port = cfg.get("port")
+        if not port:
+            raise ValueError("serial_bridge device needs 'port' (the COM port on the gateway)")
+        self.ser = _BridgeSerial(url, cfg.get("token", ""), port, int(cfg.get("baud", "115200")), timeout=0.05)
+        time.sleep(0.3)
+        if self.ser.open_error:
+            err = self.ser.open_error
+            self.ser.close()
+            self.ser = None
+            raise ConnectionError("serial-bridge could not open %s: %s" % (port, err))
+        self._provision()
 
 
 # ==========================================================================
@@ -765,6 +911,8 @@ def create_session(name, cfg):
     transport = cfg.get("transport", "ssh")
     if transport == "serial":
         return SerialSession(name, cfg)
+    if transport == "serial_bridge":
+        return SerialBridgeSession(name, cfg)
     if transport == "adb":
         return AdbSession(name, cfg)
     return Session(name, cfg)

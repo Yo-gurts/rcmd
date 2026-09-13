@@ -30,6 +30,18 @@ serial_board:
   port: COM3                        # Windows: COM3 / Linux: /dev/ttyUSB0
   baud: 115200                      # default 115200
 
+# Serial console reached over a serial-bridge WebSocket gateway.
+# The physical serial port lives on ANOTHER host running serial-bridge
+# (https://github.com/Yo-gurts/serial-bridge). Use this when rcmd runs on a
+# server but the device's UART is attached to a Windows/other machine.
+# Requires: pip install websocket-client
+serial_bridge_board:
+  transport: serial_bridge
+  url: ws://192.168.1.10:8000/ws    # the gateway's WebSocket endpoint
+  token: CHANGE_ME                  # gateway --token (omit/empty if gateway is token-free)
+  port: COM7                        # the COM port ON THE GATEWAY host
+  baud: 115200                      # default 115200
+
 # Android device / board with adbd (embedded Linux with adb daemon)
 # Requires: adb in PATH (Android platform-tools)
 adb_board:
