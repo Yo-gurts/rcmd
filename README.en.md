@@ -52,9 +52,12 @@ expect: ___RCMD_<rand>___:(\d+)      # \d+ is the exit code; text before = outpu
 ```bash
 pip3 install --user pexpect          # required for telnet/ssh (Linux)
 pip3 install --user pyserial         # required for serial transport
-pip3 install --user websocket-client # required for serial_bridge transport
+pip3 install --user websocket-client # required for serial_bridge / prompt_bridge
 cp devices.yaml.example devices.yaml # then edit with your real hosts
 ```
+
+Dependencies are **optional per transport** — install only what you use, or
+`pip install -r requirements.txt` to grab them all.
 
 The **adb** transport needs `adb` in your `PATH` (Android platform-tools);
 no Python dependency required.

@@ -1,0 +1,16 @@
+# rcmd 依赖 —— 全部按传输方式可选,只装你实际用到的即可。
+# 标准库已覆盖核心逻辑(socket/json/subprocess/threading 等),无强制依赖。
+#
+#   pip install -r requirements.txt        # 一次装全
+#   pip install pexpect                     # 或按需单装
+#
+# 各传输所需:
+#   ssh / telnet                -> pexpect        (仅 Linux/Mac;Windows 不支持)
+#   serial                      -> pyserial
+#   serial_bridge / prompt_bridge -> websocket-client
+#   prompt (本地串口)            -> pyserial
+#   adb                         -> 无 Python 依赖,但需 PATH 中有 `adb`
+
+pexpect>=4.8          # ssh / telnet
+pyserial>=3.5         # serial / prompt
+websocket-client>=1.0 # serial_bridge / prompt_bridge

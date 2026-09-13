@@ -47,9 +47,11 @@ expect: ___RCMD_<rand>___:(\d+)      # \d+ 即退出码；前面的文本是输�
 ```bash
 pip3 install --user pexpect          # telnet/ssh 需要（Linux）
 pip3 install --user pyserial         # serial 传输需要
-pip3 install --user websocket-client # serial_bridge 传输需要
+pip3 install --user websocket-client # serial_bridge / prompt_bridge 传输需要
 cp devices.yaml.example devices.yaml # 然后编辑填入真实设备
 ```
+
+依赖都是**按传输方式可选**的,只装用到的即可;也可以 `pip install -r requirements.txt` 一次装全。
 
 **adb** 传输需要 `adb` 在你的 `PATH`（Android platform-tools），无需 Python 依赖。
 
