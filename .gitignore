@@ -5,12 +5,17 @@ devices.yaml
 __pycache__/
 *.pyc
 
+# 虚拟环境(用 ./setup_venv.sh 创建)
+.venv/
+venv/
+
 # 编辑器
 .vscode/
 .idea/
 
-# 临时调试脚本
+# 临时调试脚本(setup_venv.sh 是正式脚本,需保留)
 *.sh
+!setup_venv.sh
 
 # 编辑器交换/临时文件
 *.swp

@@ -1301,5 +1301,32 @@ def main(argv):
     return 2
 
 
+def _maybe_reexec_venv():
+    """If a sibling `.venv` exists and we're not already running inside it,
+    re-exec under that venv's Python.
+
+    rcmd's deps (pyserial / websocket-client / pexpect) are best isolated in a
+    venv to avoid clashing with system packages (e.g. yoctools pinning an older
+    ruamel.yaml). Because the daemon is spawned with sys.executable, switching
+    the interpreter here means both the client *and* the daemon pick up the
+    venv automatically. Run `./setup_venv.sh` once to create it.
+    """
+    here = os.path.dirname(os.path.realpath(__file__))
+    venv_dir = os.path.join(here, ".venv")
+    bindir = "Scripts" if IS_WINDOWS else "bin"
+    venv_py = os.path.join(venv_dir, bindir, "python.exe" if IS_WINDOWS else "python")
+    if not os.path.exists(venv_py):
+        return  # no venv → use the current interpreter as before
+    # sys.prefix points at the venv dir when we're already inside it (reliable
+    # even though venv/bin/python may symlink back to the system python).
+    if os.path.realpath(sys.prefix) == os.path.realpath(venv_dir):
+        return
+    try:
+        os.execv(venv_py, [venv_py, os.path.realpath(__file__)] + sys.argv[1:])
+    except OSError:
+        pass  # fall back to the current interpreter
+
+
 if __name__ == "__main__":
+    _maybe_reexec_venv()
     sys.exit(main(sys.argv[1:]))

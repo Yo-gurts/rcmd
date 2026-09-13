@@ -59,6 +59,17 @@ cp devices.yaml.example devices.yaml # then edit with your real hosts
 Dependencies are **optional per transport** — install only what you use, or
 `pip install -r requirements.txt` to grab them all.
 
+**A venv is recommended** (keeps rcmd's deps from clashing with system tools,
+e.g. yoctools pinning an older ruamel.yaml):
+
+```bash
+./setup_venv.sh                      # create .venv and install deps
+```
+
+Nothing else to do afterward — `rcmd.py` **auto-switches to that `.venv`** on
+startup (the daemon follows), so `./rcmd.py ...` or the PATH-symlinked `rcmd`
+just work.
+
 The **adb** transport needs `adb` in your `PATH` (Android platform-tools);
 no Python dependency required.
 

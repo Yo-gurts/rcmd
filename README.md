@@ -53,6 +53,14 @@ cp devices.yaml.example devices.yaml # 然后编辑填入真实设备
 
 依赖都是**按传输方式可选**的,只装用到的即可;也可以 `pip install -r requirements.txt` 一次装全。
 
+**推荐用虚拟环境**(避免和系统里其它工具的依赖打架,如 yoctools 钉死的 ruamel.yaml):
+
+```bash
+./setup_venv.sh                      # 建 .venv 并装好依赖
+```
+
+装好后无需额外操作——`rcmd.py` 启动时会**自动切到该 `.venv`** 运行(daemon 也随之使用),照常 `./rcmd.py ...` 或用 PATH 里的软链 `rcmd ...` 即可。
+
 **adb** 传输需要 `adb` 在你的 `PATH`（Android platform-tools），无需 Python 依赖。
 
 **Windows** 上 `pexpect` 不可用，因此只支持 `serial` 和 `adb` 传输；daemon 会自动
