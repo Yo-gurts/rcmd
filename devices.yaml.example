@@ -42,6 +42,20 @@ serial_bridge_board:
   port: COM7                        # the COM port ON THE GATEWAY host
   baud: 115200                      # default 115200
 
+# Prompt-based shell with NO POSIX $? (RT-Thread msh / FinSH, U-Boot, …).
+# Boundary = the shell prompt reappearing (regex, configurable); exit code is a
+# heuristic (127 on error_pattern match, else 0). `prompt` = local serial;
+# `prompt_bridge` = over a serial-bridge gateway (needs websocket-client).
+msh_board:
+  transport: prompt_bridge          # or `prompt` for a local serial port
+  url: ws://192.168.1.10:8000/ws    # gateway WebSocket (prompt_bridge only)
+  token: CHANGE_ME                  # gateway --token (omit if token-free)
+  port: COM9                        # COM port on the gateway (prompt: local path)
+  baud: 115200
+  prompt: "msh [^\r\n>]*>"          # default; matches "msh />", "msh /mnt>" …
+                                    #   U-Boot example: prompt: "=> "
+  error_pattern: "command not found"  # output matching this → exit code 127
+
 # Android device / board with adbd (embedded Linux with adb daemon)
 # Requires: adb in PATH (Android platform-tools)
 adb_board:

@@ -1,6 +1,6 @@
 # rcmd — 像本地命令一样远程执行
 
-在远程 **telnet**、**ssh**、**serial**、**serial_bridge** 或 **adb** 设备上执行命令，就像在本地一样。
+在远程 **telnet**、**ssh**、**serial**、**serial_bridge**、**prompt**/**prompt_bridge** 或 **adb** 设备上执行命令，就像在本地一样。
 每个设备保持一个持久 shell，`cd` / env / 状态跨调用保留，每次 `exec`
 都返回**真实的远程退出码**。为 AI 工具（可从 Bash 工具调用）和人类用户
 设计。支持 Linux 和 Windows。
@@ -143,6 +143,26 @@ ln -s "$PWD/skills/rcmd" ~/.claude/skills/rcmd   # 或 cp -r
 > 网关（`python server.py --host 0.0.0.0 --token <token>`），rcmd 侧
 > `pip install websocket-client`。串口是独占的——网关侧若已有别的客户端
 > （如浏览器 UI）开着同一个口，rcmd 打开时会因端口占用失败。
+
+### prompt / prompt_bridge —— 无 `$?` 的提示符型 shell（RT-Thread msh、U-Boot…）
+
+`serial`/`serial_bridge`/`ssh` 都靠 bash 哨兵机制（`__rc=$?; echo MARKER:$__rc`）
+拿退出码；但 **RT-Thread msh / FinSH、U-Boot** 这类 shell 没有 `$?`、没有分号
+语法，套哨兵必然超时。`prompt`（本地串口）和 `prompt_bridge`（经 serial-bridge
+网关）为它们而生：
+
+- **命令边界 = 提示符重新出现**：正则匹配，**每设备可配** `prompt:`。默认匹配
+  RT-Thread msh（含 `cd` 后变化的路径，如 `msh /mnt>`）；U-Boot 设 `prompt: "=> "`。
+- **退出码 = 启发式**（这类 shell 无真实返回码）：输出命中 `error_pattern:`
+  （默认识别 `command not found`）→ `127`，否则 `0`。想把更多失败判为非零就改
+  `error_pattern`。
+- 输出会自动剥离 ANSI 颜色码、回显的命令行与尾部提示符；`cd` 等状态照常跨调用保留。
+
+```bash
+./rcmd exec msh_board "version"     # → RT-Thread banner，退出码 0
+./rcmd exec msh_board "foobar"      # → "foobar: command not found."，退出码 127
+./rcmd exec msh_board "cd /mnt"; ./rcmd exec msh_board "pwd"   # → /mnt（有状态）
+```
 
 ---
 

@@ -14,6 +14,10 @@ Transports:
   - serial_bridge : serial over a serial-bridge WebSocket gateway (the serial
                     port lives on another host running serial-bridge; needs
                     `pip install websocket-client`)
+  - prompt        : prompt-based shell over local serial (RT-Thread msh,
+                    U-Boot…) — no $?, so command boundary = the shell prompt
+                    (configurable regex) and exit code is a heuristic
+  - prompt_bridge : same prompt-based shell, but over a serial-bridge gateway
   - adb           : `adb shell` subprocess pipe (cross-platform)
 
 Usage:
@@ -621,6 +625,27 @@ class _BridgeSerial:
             pass
 
 
+def _open_bridge_serial(cfg):
+    """Build a _BridgeSerial from a serial_bridge/prompt_bridge device config.
+
+    Shared by SerialBridgeSession and PromptBridgeSession. Raises on missing
+    keys or if the gateway can't open the port.
+    """
+    url = cfg.get("url")
+    if not url:
+        raise ValueError("bridge device needs 'url' (ws://host:port/ws)")
+    port = cfg.get("port")
+    if not port:
+        raise ValueError("bridge device needs 'port' (the COM port on the gateway)")
+    ser = _BridgeSerial(url, cfg.get("token", ""), port, int(cfg.get("baud", "115200")), timeout=0.05)
+    time.sleep(0.3)
+    if ser.open_error:
+        err = ser.open_error
+        ser.close()
+        raise ConnectionError("serial-bridge could not open %s: %s" % (port, err))
+    return ser
+
+
 class SerialBridgeSession(SerialSession):
     """Serial console reached over a serial-bridge WebSocket gateway.
 
@@ -629,26 +654,109 @@ class SerialBridgeSession(SerialSession):
     gateway's WebSocket, opens the port remotely, then reuses SerialSession's
     entire sentinel/handshake/exec machinery via the _BridgeSerial adapter.
 
+    For POSIX/bash serial consoles. For prompt-only shells (RT-Thread msh,
+    U-Boot) that have no $?, use transport `prompt_bridge` instead.
+
     Config keys: url (ws://host:port/ws), token (optional), port (COM port on
     the gateway), baud (default 115200).
     Requires: pip install websocket-client
     """
 
     def connect(self):
-        cfg = self.cfg
-        url = cfg.get("url")
-        if not url:
-            raise ValueError("serial_bridge device needs 'url' (ws://host:port/ws)")
-        port = cfg.get("port")
-        if not port:
-            raise ValueError("serial_bridge device needs 'port' (the COM port on the gateway)")
-        self.ser = _BridgeSerial(url, cfg.get("token", ""), port, int(cfg.get("baud", "115200")), timeout=0.05)
-        time.sleep(0.3)
-        if self.ser.open_error:
-            err = self.ser.open_error
-            self.ser.close()
-            self.ser = None
-            raise ConnectionError("serial-bridge could not open %s: %s" % (port, err))
+        self.ser = _open_bridge_serial(self.cfg)
+        self._provision()
+
+
+# ==========================================================================
+# SESSION: prompt / prompt_bridge  (prompt-based shells: RT-Thread msh, U-Boot…)
+# ==========================================================================
+DEFAULT_PROMPT = r"msh [^\r\n>]*>"  # RT-Thread msh: "msh />", "msh /mnt>", …
+
+
+class PromptSession(SerialSession):
+    """Persistent shell for a *prompt-based* console that has no POSIX `$?`
+    (e.g. RT-Thread msh / FinSH, U-Boot). The bash sentinel protocol can't work
+    here, so instead:
+
+      - **Command boundary** = the shell prompt reappearing. This is a regex,
+        configurable per device via `prompt` (default matches RT-Thread msh,
+        including path changes after `cd`, e.g. `msh /mnt>`). Set it to your
+        shell's prompt for others, e.g. U-Boot: `prompt: "=> "`.
+      - **Exit code** = heuristic, since these shells expose no real code:
+        127 when the output matches `error_pattern` (default detects
+        "command not found"), else 0. Override `error_pattern` (regex) to flag
+        more failures as non-zero.
+
+    Reuses SerialSession's byte-pipe primitives (_write/_read_until/_drain);
+    only the handshake/exec/clean are prompt-based rather than sentinel-based.
+    """
+
+    def _prompt(self):
+        return self.cfg.get("prompt") or DEFAULT_PROMPT
+
+    def _error_pattern(self):
+        return self.cfg.get("error_pattern") or r"command not found|: not found"
+
+    def _handshake(self):
+        # No PS1/stty for these shells — just poke and sync to a prompt.
+        self.ser.reset_input_buffer()
+        self._write("\r")
+        try:
+            self._read_until(self._prompt(), timeout=10)
+        except TimeoutError:
+            pass  # some consoles stay silent until a command — tolerate it
+        self._drain(0.3)
+
+    def exec(self, command, timeout=DEFAULT_TIMEOUT):
+        if not self.connected:
+            self.connect()
+        self.ser.reset_input_buffer()
+        self._write(command + "\r")
+        try:
+            before, _ = self._read_until(self._prompt(), timeout=timeout)
+        except TimeoutError:
+            self._interrupt_and_resync()
+            raise TimeoutError(
+                "command timed out after %ss (long-running/interactive? use `rcmd raw`)" % timeout
+            )
+        code = 127 if re.search(self._error_pattern(), before) else 0
+        return self._clean(before, command), code
+
+    def _interrupt_and_resync(self):
+        """Recover after a timeout: Ctrl-C, then resync to a fresh prompt."""
+        try:
+            self._write("\x03")
+            time.sleep(0.3)
+            self.ser.reset_input_buffer()
+            self._write("\r")
+            self._read_until(self._prompt(), timeout=5)
+            self._drain(0.2)
+        except Exception:
+            self.close()
+
+    def _clean(self, out, command):
+        # Strip ANSI/CSI escapes (msh colorizes `ls`), normalize EOL, drop the
+        # echoed command line and any trailing prompt fragment.
+        out = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out)
+        out = out.replace("\r\n", "\n").replace("\r", "\n")
+        lines = out.split("\n")
+        if lines and lines[0].strip() == command.strip():
+            lines = lines[1:]
+        out = re.sub(self._prompt(), "", "\n".join(lines))
+        return out.strip("\n").rstrip()
+
+
+class PromptBridgeSession(PromptSession):
+    """Prompt-based shell (see PromptSession) reached over a serial-bridge
+    WebSocket gateway. This is the transport for an RT-Thread msh / U-Boot
+    device whose UART is attached to another host running serial-bridge.
+
+    Config keys: url, token (optional), port, baud, plus PromptSession's
+    `prompt` / `error_pattern`. Requires: pip install websocket-client
+    """
+
+    def connect(self):
+        self.ser = _open_bridge_serial(self.cfg)
         self._provision()
 
 
@@ -913,6 +1021,10 @@ def create_session(name, cfg):
         return SerialSession(name, cfg)
     if transport == "serial_bridge":
         return SerialBridgeSession(name, cfg)
+    if transport == "prompt":
+        return PromptSession(name, cfg)
+    if transport == "prompt_bridge":
+        return PromptBridgeSession(name, cfg)
     if transport == "adb":
         return AdbSession(name, cfg)
     return Session(name, cfg)

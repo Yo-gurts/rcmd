@@ -1,7 +1,7 @@
 # rcmd — run remote commands like local
 
-Run commands on remote **telnet**, **ssh**, **serial**, **serial_bridge** or
-**adb** devices as if
+Run commands on remote **telnet**, **ssh**, **serial**, **serial_bridge**,
+**prompt**/**prompt_bridge** or **adb** devices as if
 they were local. One persistent shell per device keeps `cd` / env / state
 across calls, and every `exec` returns the **real remote exit code**. Built
 for AI tools (call it from the Bash tool) and humans alike. Works on Linux
@@ -149,5 +149,28 @@ Examples:
 > `pip install websocket-client`. Serial ports are exclusive — if the gateway
 > already has another client (e.g. the browser UI) holding the same port,
 > rcmd's open will fail as busy.
+
+### prompt / prompt_bridge — prompt-only shells with no `$?` (RT-Thread msh, U-Boot…)
+
+`serial`/`serial_bridge`/`ssh` get exit codes via a bash sentinel
+(`__rc=$?; echo MARKER:$__rc`). Shells like **RT-Thread msh / FinSH** and
+**U-Boot** have no `$?` and no `;` sequencing, so the sentinel just times out.
+`prompt` (local serial) and `prompt_bridge` (over a serial-bridge gateway)
+handle them:
+
+- **Command boundary = the prompt reappearing** — a regex, configurable per
+  device via `prompt:`. Default matches RT-Thread msh (including the path after
+  `cd`, e.g. `msh /mnt>`); for U-Boot set `prompt: "=> "`.
+- **Exit code = heuristic** (these shells expose no real code): output matching
+  `error_pattern:` (default detects `command not found`) → `127`, else `0`.
+  Widen `error_pattern` to flag more failures as non-zero.
+- Output is auto-stripped of ANSI colors, the echoed command line, and the
+  trailing prompt; `cd`/state still persists across calls.
+
+```bash
+./rcmd exec msh_board "version"     # → RT-Thread banner, exit 0
+./rcmd exec msh_board "foobar"      # → "foobar: command not found.", exit 127
+./rcmd exec msh_board "cd /mnt"; ./rcmd exec msh_board "pwd"   # → /mnt (stateful)
+```
 
 Env: `RCMD_CONFIG` (config path), `RCMD_TIMEOUT` (per-command seconds).
