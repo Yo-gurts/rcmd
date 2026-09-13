@@ -14,3 +14,6 @@
 pexpect>=4.8          # ssh / telnet
 pyserial>=3.5         # serial / prompt
 websocket-client>=1.0 # serial_bridge / prompt_bridge
+#   注意:是 websocket-client,不是 websocket!后者会占用同名 `websocket`
+#   模块却缺少 create_connection。若报该 AttributeError,先卸掉冲突包:
+#     pip uninstall -y websocket websocket-client && pip install websocket-client

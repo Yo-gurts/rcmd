@@ -541,7 +541,20 @@ class _BridgeSerial:
     """
 
     def __init__(self, url, token, port, baud, timeout=0.05):
-        import websocket  # websocket-client
+        try:
+            import websocket  # from the `websocket-client` package
+        except ImportError:
+            raise RuntimeError(
+                "serial_bridge/prompt_bridge needs the 'websocket-client' package: "
+                "pip install websocket-client"
+            )
+        # The unrelated `websocket` package shadows the same import name but lacks
+        # create_connection — detect that mix-up and give an actionable message.
+        if not hasattr(websocket, "create_connection"):
+            raise RuntimeError(
+                "wrong 'websocket' package installed (missing create_connection). "
+                "Fix: pip uninstall -y websocket websocket-client && pip install websocket-client"
+            )
 
         self.timeout = timeout
         self._buf = bytearray()
