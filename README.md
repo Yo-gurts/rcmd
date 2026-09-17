@@ -174,6 +174,52 @@ ln -s "$PWD/skills/rcmd" ~/.claude/skills/rcmd   # 或 cp -r
 ./rcmd exec msh_board "cd /mnt"; ./rcmd exec msh_board "pwd"   # → /mnt（有状态）
 ```
 
+## 网络中转：rcmd 所在机器够不到设备时（SSH 隧道）
+
+`rcmd` 只连 `devices.yaml` 里的 `host:port`。当 **rcmd 所在机器（Server）够不到目标设备**——设备在客户/办公局域网或 NAT 之后，Server 只在机房——先用 SSH 隧道把「设备的 telnet/ssh 端口」搬到 **Server 的 `127.0.0.1:<端口>`**，再把设备块的 `host` 填 `127.0.0.1`、`port` 填该端口即可，rcmd 用法完全不变。
+
+### 反向隧道 `ssh -R`：设备与用户 PC 同网，PC 能 ssh 到 Server（最常见）
+
+拓扑 `设备(telnet 23) ── 局域网 ── 用户 PC ──能 ssh──▶ Server(rcmd)`，而 Server 够不到设备。既然只有 PC→Server 这条通道，就在 **PC 上**发起反向隧道，把设备端口反向映射进 Server 的 loopback：
+
+```bash
+# 在【用户 PC】上执行（PC 与设备同网、且能 ssh 到 Server）
+# Server 的 127.0.0.1:12300  ──经本隧道──▶  设备IP:23（telnet）
+ssh -N -R 12300:<设备局域网IP>:23 \
+    -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+    <server用户>@<server地址>
+```
+
+- 映射到 Server 的 loopback，**无需** Server sshd 开 `GatewayPorts`。
+- `-N` 只建隧道；`ServerAlive*` 抗抖动，长期挂机可换 `autossh -M 0 -N -R ...`。
+- 设备走 SSH 而非 telnet：把右侧 `:23` 改 `:22`，设备块 `transport: ssh`。
+
+隧道起来后，在 **Server 的 `devices.yaml`** 里：
+
+```yaml
+board_via_pc:
+  transport: telnet
+  host: 127.0.0.1
+  port: 12300          # 与 ssh -R 左边端口一致
+  username: root
+  login_prompt: "login:"
+  password_prompt: "Password:"
+  password: <设备密码>
+```
+
+排障：Server 上 `ss -ltnp | grep 12300` 确认隧道端口在监听——不在=PC 侧 `ssh -R` 断了，让用户重连；在监听但握手失败=PC 到设备那一跳不通。
+
+### 正向隧道 `ssh -L`：Server 能 ssh 到与设备同网的跳板
+
+方向相反时在 **Server 上**发起即可，无需动 PC：
+
+```bash
+# 在【Server】上执行；Server 127.0.0.1:12300 ──▶ JUMP ──▶ 设备IP:23
+ssh -f -N -L 12300:<设备局域网IP>:23 <jump用户>@<jump地址>
+```
+
+`devices.yaml` 同样填 `host: 127.0.0.1` / `port: 12300`。
+
 ---
 
 [English README](README.en.md)

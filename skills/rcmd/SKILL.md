@@ -38,6 +38,11 @@ rcmd --help                                        # 完整用法
 rcmd exec board "test -f /etc/foo && echo yes"; echo $?
 ```
 
+**超时时间可配（默认 30s，偏短）**：编译、拉流、大文件、`reboot` 后等待重连等长命令必然超过 30s，要显式放宽。两种方式，**优先 `-t`**：
+
+- **`-t N`（逐条、实时生效，首选）**：`rcmd exec <dev> "make -j8" -t 1800`。只作用于这一条，不影响其它命令。
+- **`RCMD_TIMEOUT=N`（改默认值，有坑）**：改的是「进程启动那一刻」读到的默认值，但真正跑命令的是**常驻 daemon**——它早已启动、值已定死，所以在 client 前临时加 `RCMD_TIMEOUT=120` 对**已在跑的 daemon 无效**。必须先 `rcmd stop` 杀掉 daemon，下次带新值启动的 daemon 才生效。因此想全局调大，用 `rcmd stop && RCMD_TIMEOUT=120 rcmd exec ...`；只想放宽某条命令，直接 `-t`。
+
 **注意**：若 `rcmd ls` 报「配置目录 not a directory」，每次调用都得带 `RCMD_CONFIG` 前缀，见「上手流程」。
 
 ## 必须记住的规则（否则会卡住）
@@ -73,6 +78,54 @@ RCMD_CONFIG=<devices.yaml 的路径> rcmd exec <device> "命令"
 ```
 
 不确定设备上是 busybox 还是 procps 工具时，先 `rcmd exec <device> "<tool> --help 2>&1 | head"` 探一下参数。
+
+## 特殊场景：网络中转（设备够不到时）
+
+`rcmd` 只是个客户端——它连的是 `devices.yaml` 里写的 `host:port`。当 **Server（Agent 所在机）够不到目标设备**（设备在客户/办公局域网、NAT 后，Server 只在机房），需要先用 SSH 隧道把「设备的 telnet/ssh 端口」搬到 **Server 的 `127.0.0.1:<某端口>`**，再让 rcmd 连这个本地端口即可，其余用法完全不变。
+
+### 场景 1：设备与「用户 PC」在同一局域网，用户 PC 能 SSH 到 Server（反向隧道，最常见）
+
+拓扑：`设备(telnet 23) ── 局域网 ── 用户 PC ──能 ssh──▶ Server(Agent/rcmd)`。Server 反过来够不到设备。
+
+思路：既然只有「PC→Server」这一条 SSH 通道，就在 **PC 上**发起 **反向隧道 `ssh -R`**，把设备端口反向映射进 Server 的 loopback。**这条命令由用户在自己的 PC 上执行**（Agent 在 Server 上帮不了这一步，需明确告诉用户去 PC 敲）：
+
+```bash
+# 在【用户 PC】上执行（PC 与设备同网、且能 ssh 到 Server）
+# 语义：Server 的 127.0.0.1:12300  ──经本隧道──▶  设备IP:23（telnet）
+ssh -N -R 12300:<设备局域网IP>:23 \
+    -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+    <server用户>@<server地址>
+```
+
+- `-R 12300:<设备IP>:23`：在 **Server** 侧监听 `127.0.0.1:12300`，流量经隧道回到 PC，再由 PC 转给同网段的设备 23 口。映射到 loopback，**无需** Server sshd 开 `GatewayPorts`。
+- `-N` 只建隧道不开 shell；`ServerAlive*` 让隧道抖动时能撑住/快速失败。要长期自愈可让用户改用 `autossh -M 0 -N -R ...`。
+- 设备是 SSH 而非 telnet：把 `:23` 换成 `:22`，映射到另一个端口（如 `12200`），下面设备块 `transport` 写 `ssh`。
+
+隧道起来后，在 **Server 的 `devices.yaml`** 里把该设备指向本地端口：
+
+```yaml
+board_via_pc:            # telnet 设备经反向隧道
+  transport: telnet
+  host: 127.0.0.1
+  port: 12300            # 与 ssh -R 左边端口一致
+  username: root
+  login_prompt: "login:"
+  password_prompt: "Password:"
+  password: <设备密码>
+```
+
+之后照常 `rcmd exec board_via_pc "..."`。**排障口诀**：`rcmd` 报连不上，先在 Server 上 `ss -ltnp | grep 12300` 确认隧道端口在监听——不在 = 用户 PC 那条 `ssh -R` 断了或没起，让用户重连；在监听但 telnet 握手失败 = PC 到设备那一跳不通（设备 IP/telnetd）。
+
+### 场景 2：反过来，Server 能 SSH 到 PC / 跳板（正向隧道 `ssh -L`）
+
+若可达方向相反（Server 能 ssh 到那台与设备同网的机器 `JUMP`），在 **Server 上**发起正向隧道即可，无需动 PC：
+
+```bash
+# 在【Server】上执行；Server 的 127.0.0.1:12300 ──▶ JUMP ──▶ 设备IP:23
+ssh -f -N -L 12300:<设备局域网IP>:23 <jump用户>@<jump地址>
+```
+
+`devices.yaml` 同样填 `host: 127.0.0.1` / `port: 12300`。
 
 ## 踩坑速记（来自本项目 memory）
 

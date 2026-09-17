@@ -1048,6 +1048,7 @@ def create_session(name, cfg):
 # ==========================================================================
 class Daemon:
     def __init__(self):
+        self.config_path = CONFIG_PATH
         self.devices = load_config(CONFIG_PATH)
         self.sessions = {}
 
@@ -1086,7 +1087,7 @@ class Daemon:
                             "connected": bool(s and s.connected),
                         }
                     )
-                return {"ok": True, "devices": items}
+                return {"ok": True, "devices": items, "config": self.config_path}
             if action == "reset":
                 if req["device"] in self.sessions:
                     self.sessions[req["device"]].close()
@@ -1281,6 +1282,9 @@ def main(argv):
 
     if cmd == "ls":
         resp = request({"action": "ls"})
+        cfg = resp.get("config")
+        if cfg:
+            print("config: %s" % cfg)
         for d in resp.get("devices", []):
             state = "connected" if d["connected"] else "idle"
             print("%-10s %-7s %-16s %s" % (d["device"], d["transport"], d["host"], state))
