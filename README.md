@@ -125,9 +125,11 @@ ln -s "$PWD/skills/rcmd" ~/.claude/skills/rcmd   # 或 cp -r
 - **telnet** → 经 exec 通道走 **base64**（telnet 无 scp/sftp）。设备侧需要
   `base64` 与 `md5sum`（busybox 自带）。原理：文件 base64 后分块写入
   `/tmp` 临时文件，再 `base64 -d` 解码到目标；两端 `md5` 自动校验，不一致
-  会报错。受两个硬约束：单行命令 ≤ 约 3.5KB（tty 规范输入上限，故每块
-  3072B），且 push 逐块往返较慢——已用「批量发送 48 块 + 单次哨兵同步」
-  优化（约 2.5MB 一分钟级）。pull 是一次性 `base64 <file>` 读回，更快。
+  会报错。实测该数据通路饱和于约 **57 KB/s**（pty/telnet 链路固有，与板端
+  无关），因此 push 默认先 **gzip 压缩**再 base64（设备有 `gunzip` 且压缩
+  收益 >5% 时启用，二进制约省一半、文本更多），配合「批量发送 48 块 +
+  单次哨兵同步」，2.5MB 二进制约 33s。已压缩文件自动回退纯 base64。
+  pull 是一次性 `base64 <file>` 读回，更快。
 
 ## AI 调用方注意事项
 

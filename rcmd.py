@@ -34,6 +34,7 @@ Usage:
 The client auto-spawns the daemon on first use.
 """
 import base64
+import gzip
 import hashlib
 import json
 import os
@@ -329,6 +330,10 @@ class Session:
     # Two hard limits shape this:
     #  * a single line longer than the tty canonical input limit (~4 KB) never
     #    completes -> keep each appended line <= _B64_CHUNK.
+    #  * the pty/telnet data path itself saturates around ~57 KB/s (measured;
+    #    cat-streaming with zero shell involvement hits the same wall), so the
+    #    only real speed lever is moving fewer bytes: gzip before base64 when
+    #    the device has gunzip and the data actually compresses.
     #  * one sentinel round-trip per line is latency-bound and painfully slow
     #    over a tunnel -> send _B64_BATCH lines back-to-back, then sync once.
     # base64 is streamed into a temp file, decoded on-device, md5 verified.
@@ -339,7 +344,18 @@ class Session:
         import pexpect
         with open(local_path, "rb") as f:
             data = f.read()
-        b64 = base64.b64encode(data).decode("ascii")
+        # Compress first when worthwhile: the pipe is the bottleneck (~57 KB/s),
+        # so shrinking bytes beats every other tweak. gzip ~= 50% on binaries,
+        # much more on text; skip when already compressed or gunzip is missing.
+        payload = data
+        decode_cmd = "base64 -d %%s > %s && rm -f %%s" % remote_path
+        out, _ = self.exec("command -v gunzip >/dev/null 2>&1 && echo yes")
+        if out.strip() == "yes":
+            gz = gzip.compress(data, 6)
+            if len(gz) < len(data) * 0.95:
+                payload = gz
+                decode_cmd = "base64 -d %%s | gunzip > %s && rm -f %%s" % remote_path
+        b64 = base64.b64encode(payload).decode("ascii")
         tmp = "/tmp/.rcmd_push_%s.b64" % uuid.uuid4().hex[:12]
         if not self.connected:
             self.connect()
@@ -358,7 +374,7 @@ class Session:
                 self._interrupt_and_resync()
                 raise RuntimeError("push stalled sending base64 to %s" % remote_path)
         # busybox base64 has no long options; -d decodes.
-        self._checked("base64 -d %s > %s && rm -f %s" % (tmp, remote_path, tmp), timeout=max(DEFAULT_TIMEOUT, 120))
+        self._checked(decode_cmd % (tmp, tmp), timeout=max(DEFAULT_TIMEOUT, 120))
         want = hashlib.md5(data).hexdigest()
         got, _ = self.exec("md5sum %s 2>/dev/null | cut -d' ' -f1" % remote_path,
                     timeout=max(DEFAULT_TIMEOUT, 120))
