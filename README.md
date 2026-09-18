@@ -92,8 +92,8 @@ ln -s "$PWD/skills/rcmd" ~/.claude/skills/rcmd   # 或 cp -r
 ```bash
 ./rcmd exec <device> "<command>"   # 执行命令；退出码透传
 ./rcmd exec <device> "<cmd>" -t 60 # 指定单命令超时（秒，默认 30）
-./rcmd push <device> <local> <remote>   # 推文件到设备（ssh/scp；密码认证自动走 sshpass）
-./rcmd pull <device> <remote> <local>   # 从设备拉文件
+./rcmd push <device> <local> <remote>   # 推文件到设备（ssh→scp / telnet→base64 / adb→adb push）
+./rcmd pull <device> <remote> <local> # 从设备拉文件（同上）
 ./rcmd ls                          # 列出设备 + 连接状态
 ./rcmd reset <device>              # 断开并重连（清除 cd/env）
 ./rcmd raw <device> "<keys>"       # 发送原始按键（无退出码）
@@ -117,6 +117,17 @@ ln -s "$PWD/skills/rcmd" ~/.claude/skills/rcmd   # 或 cp -r
 **断连自愈**：ssh 会话带 `ServerAliveInterval=15` keepalive；exec 遇到
 连接被断（闲置断开、隧道抖动、设备重启）会自动重连并**重试当前命令**，
 调用方一般无需手动 `reset`。
+
+**文件传输按传输方式自动选路**（`push`/`pull` 接口统一）：
+
+- **ssh** → `scp`（密码认证自动走 `sshpass`）。
+- **adb** → 原生 `adb push`/`adb pull`。
+- **telnet** → 经 exec 通道走 **base64**（telnet 无 scp/sftp）。设备侧需要
+  `base64` 与 `md5sum`（busybox 自带）。原理：文件 base64 后分块写入
+  `/tmp` 临时文件，再 `base64 -d` 解码到目标；两端 `md5` 自动校验，不一致
+  会报错。受两个硬约束：单行命令 ≤ 约 3.5KB（tty 规范输入上限，故每块
+  3072B），且 push 逐块往返较慢——已用「批量发送 48 块 + 单次哨兵同步」
+  优化（约 2.5MB 一分钟级）。pull 是一次性 `base64 <file>` 读回，更快。
 
 ## AI 调用方注意事项
 

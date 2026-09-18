@@ -23,8 +23,8 @@ description: Run commands on remote telnet, ssh, serial, serial_bridge, prompt/p
 rcmd ls                                            # 先看有哪些设备、是否已连接
 rcmd exec <device> "<cmd>"                         # 主力：跑命令，rcmd 退出码 == 远程退出码
 rcmd exec <device> "<cmd>" -t 60                   # 单命令超时（秒，默认 30，可用 RCMD_TIMEOUT 覆盖）
-rcmd push <device> <local> <remote>                # 推文件到设备（scp，密码自动走 sshpass）
-rcmd pull <device> <remote> <local>                # 从设备拉文件
+rcmd push <device> <local> <remote>                # 推文件到设备（ssh→scp / telnet→base64 / adb→adb push）
+rcmd pull <device> <remote> <local>                # 从设备拉文件（同上，按 transport 自动选路）
 rcmd reset <device>                                # 会话乱了/要干净环境时重连
 rcmd raw <device> "<keys>"                         # 仅交互式程序用，发原始按键（无退出码）
 rcmd logs <device> [n]                             # 调试：看该会话最近原始 I/O
@@ -132,6 +132,7 @@ ssh -f -N -L 12300:<设备局域网IP>:23 <jump用户>@<jump地址>
 - **部署/替换运行中二进制**：不要 `rcmd push` 直接覆盖运行中的可执行文件，会 `Text file busy`（ETXTBSY）。正确流程：推到临时名（`rcmd push dev ./app /tmp/app.new`）→ `rcmd exec dev "md5sum /tmp/app.new"` 校验 → `rcmd exec dev "mv -f /tmp/app.new /app/bin/app"` 原子替换（rename 不碰运行中 inode）→ 按需 reboot。小容量 ROOTFS 还要先 `df -h` 确认剩余空间。
 - **设备无 `timeout` 命令**：嵌入式板 busybox 常没有 `timeout`，写 `timeout N <cmd>` 会 127 静默失败、命令根本没发出。限时改用 `rcmd exec -t N`（外层超时）或命令自身的限时参数。
 - **别信一次性回显判断命令是否生效**：某些设备 CLI（如大核 `alios_cli` 转发小核命令）显示的"回显"是滞后的日志环形缓冲，会读到陈旧的 `cmd not found`/help。判断生效看**客观副作用**（如 `cpuusage` 看 idle%），别只看一次回显。
+- **telnet 设备也能 `push`/`pull`**：telnet 没有 scp/sftp，rcmd 经 exec 通道走 **base64**（设备侧需 `base64`+`md5sum`，busybox 自带），两端 md5 自动校验。比 scp 慢（约 2.5MB 一分钟级），大文件优先用 ssh/adb 设备；只有 telnet 才用它。部署替换运行中二进制的临时名+`mv` 流程同样适用。
 - **挂测/巡检慎用会建常驻任务的命令**：如 `alios_cli` 的 `cpuusage` 无参数会永久运行；采样要带界（`cpuusage -d 500 -t 1500`）。本仓库 memory 里有更详细的 [[alios-cli-log-mmap-is-stale-ring]]、[[device-ops-must-use-rcmd]] 可查。
 
 ## 配置

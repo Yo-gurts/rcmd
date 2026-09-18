@@ -34,6 +34,7 @@ Usage:
 The client auto-spawns the daemon on first use.
 """
 import base64
+import hashlib
 import json
 import os
 import queue
@@ -296,18 +297,98 @@ class Session:
         raise RuntimeError("scp failed")
 
     def push(self, local_path, remote_path):
-        """Copy a local file to the device via scp (ssh transport only)."""
-        if self.cfg.get("transport", "ssh") != "ssh":
-            raise ValueError("push over %s transport not supported" % self.cfg.get("transport"))
-        self._scp(local_path, "%s@%s:%s" % (self.cfg["username"], self.cfg["host"], remote_path))
+        """Copy a local file to the device.
+
+        ssh -> scp; telnet -> base64 over the exec channel (no scp/sftp there).
+        """
+        transport = self.cfg.get("transport", "ssh")
+        if transport == "ssh":
+            self._scp(local_path, "%s@%s:%s" % (self.cfg["username"], self.cfg["host"], remote_path))
+        elif transport == "telnet":
+            self._b64_push(local_path, remote_path)
+        else:
+            raise ValueError("push over %s transport not supported" % transport)
         return "pushed %s -> %s:%s" % (local_path, self.name, remote_path)
 
     def pull(self, remote_path, local_path):
-        """Copy a file from the device via scp (ssh transport only)."""
-        if self.cfg.get("transport", "ssh") != "ssh":
-            raise ValueError("pull over %s transport not supported" % self.cfg.get("transport"))
-        self._scp("%s@%s:%s" % (self.cfg["username"], self.cfg["host"], remote_path), local_path)
+        """Copy a file from the device.
+
+        ssh -> scp; telnet -> base64 over the exec channel (no scp/sftp there).
+        """
+        transport = self.cfg.get("transport", "ssh")
+        if transport == "ssh":
+            self._scp("%s@%s:%s" % (self.cfg["username"], self.cfg["host"], remote_path), local_path)
+        elif transport == "telnet":
+            self._b64_pull(remote_path, local_path)
+        else:
+            raise ValueError("pull over %s transport not supported" % transport)
         return "pulled %s:%s -> %s" % (self.name, remote_path, local_path)
+
+    # --- base64 file transfer over the exec channel (telnet) ---------------
+    # telnet has no scp/sftp, so files move as base64 over the exec channel.
+    # Two hard limits shape this:
+    #  * a single line longer than the tty canonical input limit (~4 KB) never
+    #    completes -> keep each appended line <= _B64_CHUNK.
+    #  * one sentinel round-trip per line is latency-bound and painfully slow
+    #    over a tunnel -> send _B64_BATCH lines back-to-back, then sync once.
+    # base64 is streamed into a temp file, decoded on-device, md5 verified.
+    _B64_CHUNK = 3072
+    _B64_BATCH = 48
+
+    def _b64_push(self, local_path, remote_path):
+        import pexpect
+        with open(local_path, "rb") as f:
+            data = f.read()
+        b64 = base64.b64encode(data).decode("ascii")
+        tmp = "/tmp/.rcmd_push_%s.b64" % uuid.uuid4().hex[:12]
+        if not self.connected:
+            self.connect()
+        self._checked("rm -f %s" % tmp)
+        chunks = [b64[i:i + self._B64_CHUNK] for i in range(0, len(b64), self._B64_CHUNK)]
+        for start in range(0, len(chunks), self._B64_BATCH):
+            batch = chunks[start:start + self._B64_BATCH]
+            for chunk in batch:
+                self.child.sendline("printf '%%s' '%s' >> %s" % (chunk, tmp))
+            # One sentinel confirms the whole batch flushed to the file.
+            m = "___RCMD_%s___" % uuid.uuid4().hex[:12]
+            self.child.sendline("echo %s:$?" % m)
+            try:
+                self.child.expect(r"%s:(\d+)" % m, timeout=max(DEFAULT_TIMEOUT, 60))
+            except pexpect.TIMEOUT:
+                self._interrupt_and_resync()
+                raise RuntimeError("push stalled sending base64 to %s" % remote_path)
+        # busybox base64 has no long options; -d decodes.
+        self._checked("base64 -d %s > %s && rm -f %s" % (tmp, remote_path, tmp), timeout=max(DEFAULT_TIMEOUT, 120))
+        want = hashlib.md5(data).hexdigest()
+        got, _ = self.exec("md5sum %s 2>/dev/null | cut -d' ' -f1" % remote_path,
+                    timeout=max(DEFAULT_TIMEOUT, 120))
+        got = got.strip()
+        if got != want:
+            raise RuntimeError("push md5 mismatch: local=%s remote=%s" % (want, got))
+
+    def _b64_pull(self, remote_path, local_path):
+        out, code = self.exec("base64 %s" % remote_path, timeout=max(DEFAULT_TIMEOUT, 120))
+        if code != 0:
+            raise RuntimeError("pull failed reading %s: %s" % (remote_path, out.strip()))
+        try:
+            data = base64.b64decode("".join(out.split()))
+        except Exception as e:
+            raise RuntimeError("pull base64 decode failed: %s" % e)
+        want, _ = self.exec("md5sum %s 2>/dev/null | cut -d' ' -f1" % remote_path,
+     timeout=max(DEFAULT_TIMEOUT, 120))
+        want = want.strip()
+        got = hashlib.md5(data).hexdigest()
+        if want and got != want:
+            raise RuntimeError("pull md5 mismatch: remote=%s local=%s" % (want, got))
+        with open(local_path, "wb") as f:
+            f.write(data)
+
+    def _checked(self, command, timeout=DEFAULT_TIMEOUT):
+        """exec a command that must succeed (rc==0), else raise."""
+        out, code = self.exec(command, timeout=timeout)
+        if code != 0:
+            raise RuntimeError("remote command failed (rc=%d): %s\n%s" % (code, command, out.strip()))
+        return out
 
     def _raw_log_path(self):
         return os.path.join(RUN_DIR, "session-%s.log" % self.name)
