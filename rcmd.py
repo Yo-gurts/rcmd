@@ -301,8 +301,13 @@ class Session:
         """Copy a local file to the device.
 
         ssh -> scp; telnet -> base64 over the exec channel (no scp/sftp there).
+        A remote_path that names an existing directory receives the file under
+        its original name (scp-like).
         """
         transport = self.cfg.get("transport", "ssh")
+        if transport == "telnet":
+            # scp resolves dir targets itself; the base64 path needs help.
+            remote_path = self._resolve_remote_dir(remote_path, local_path, "push")
         if transport == "ssh":
             self._scp(local_path, "%s@%s:%s" % (self.cfg["username"], self.cfg["host"], remote_path))
         elif transport == "telnet":
@@ -315,8 +320,15 @@ class Session:
         """Copy a file from the device.
 
         ssh -> scp; telnet -> base64 over the exec channel (no scp/sftp there).
+        A remote_path that names a directory is pulled as dir/basename (scp-like).
         """
         transport = self.cfg.get("transport", "ssh")
+        if transport == "telnet":
+            remote_path = self._resolve_remote_dir(remote_path, local_path, "pull")
+            # scp fills in dir/... targets itself; the base64 path writes the
+            # file directly, so a local dir target must be joined here.
+            if os.path.isdir(local_path):
+                local_path = os.path.join(local_path, os.path.basename(remote_path))
         if transport == "ssh":
             self._scp("%s@%s:%s" % (self.cfg["username"], self.cfg["host"], remote_path), local_path)
         elif transport == "telnet":
@@ -324,6 +336,32 @@ class Session:
         else:
             raise ValueError("pull over %s transport not supported" % transport)
         return "pulled %s:%s -> %s" % (self.name, remote_path, local_path)
+
+    def _resolve_remote_dir(self, remote_path, other_path, direction):
+        """If remote_path is an existing directory, append the file's basename.
+
+        push: basename comes from the local file; pull: from the remote side,
+        probed with ls since we cannot stat the device locally.
+        """
+        out, code = self.exec("[ -d %s ] && echo D" % remote_path)
+        if code != 0 or out.strip() != "D":
+            return remote_path  # not a dir -> use as given
+        if direction == "push":
+            name = os.path.basename(other_path)
+        else:
+            out, _ = self.exec("ls %s" % remote_path)
+            # Strip ANSI color codes some devices force on ls output.
+            clean = re.sub(r"\x1b\[[0-9;]*m", "", out)
+            entries = [l.split()[-1] for l in clean.splitlines() if l.strip()]
+            if len(entries) != 1:
+                raise ValueError(
+                    "%s is a directory; name the file explicitly "
+                    "(multiple entries, cannot auto-pick)" % remote_path
+                )
+            name = entries[0]
+        if not remote_path.endswith("/"):
+            remote_path += "/"
+        return remote_path + name
 
     # --- base64 file transfer over the exec channel (telnet) ---------------
     # telnet has no scp/sftp, so files move as base64 over the exec channel.
@@ -1353,7 +1391,10 @@ def main(argv):
         if len(argv) < 4:
             sys.stderr.write("usage: rcmd push <device> <local> <remote>\n")
             return 2
-        resp = request({"action": "push", "device": argv[1], "local": argv[2], "remote": argv[3]})
+        # The daemon opens the file, and its cwd is fixed at spawn time —
+        # resolve relative paths here, in the caller's cwd, or they break.
+        local = os.path.abspath(argv[2])
+        resp = request({"action": "push", "device": argv[1], "local": local, "remote": argv[3]})
         if not resp.get("ok"):
             sys.stderr.write("rcmd: %s\n" % resp.get("error"))
             return 3
@@ -1364,7 +1405,8 @@ def main(argv):
         if len(argv) < 4:
             sys.stderr.write("usage: rcmd pull <device> <remote> <local>\n")
             return 2
-        resp = request({"action": "pull", "device": argv[1], "remote": argv[2], "local": argv[3]})
+        local = os.path.abspath(argv[3])
+        resp = request({"action": "pull", "device": argv[1], "remote": argv[2], "local": local})
         if not resp.get("ok"):
             sys.stderr.write("rcmd: %s\n" % resp.get("error"))
             return 3
