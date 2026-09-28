@@ -233,6 +233,40 @@ ssh -f -N -L 12300:<设备局域网IP>:23 <jump用户>@<jump地址>
 
 `devices.yaml` 同样填 `host: 127.0.0.1` / `port: 12300`。
 
----
+### 一键脚本 `tunnel.sh`（在用户 PC / WSL 里运行）
 
-[English README](README.en.md)
+把上面「反向隧道」那套手工 `ssh -R` 命令固化成脚本 `tunnel.sh`，**放在用户 PC（WSL 里）运行**——正是最常见的那个场景：设备与 PC 同网、PC 能 ssh 到 Server，而 Server 够不到设备。
+
+脚本头部两处按需修改：
+
+```bash
+SSH_USER_HOST="song.yu@10.80.38.25"     # Server 的 ssh 登录目标
+TUNNELS=(
+    "12302:192.168.1.78:23"     # 隧道端口:设备局域网IP:设备端口
+    "12303:192.168.10.12:23"    # 再加设备就往这里加一行
+)
+```
+
+用法：
+
+```bash
+./tunnel.sh          # 不带参数：列出每条隧道 + RUNNING/STOPPED 状态
+./tunnel.sh start    # 启动全部（每条先 stop 再 start，避免残留旧进程）
+./tunnel.sh stop     # 停止全部
+```
+
+要点：
+
+- 每条隧道即一条 `ssh -f -N -R <port>:<设备IP>:<设备端口>`——**反向**隧道，监听开在 **Server 的 `127.0.0.1:<port>`**（loopback 绑定，无需 Server sshd 开 `GatewayPorts`）；连接进来时流量经隧道回到 PC，由 PC 去连设备。Server 侧 `devices.yaml` 填 `host: 127.0.0.1` + 对应 `port` 即可。
+- 带 `-o ExitOnForwardFailure=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3`：端口被占时直接失败而非静默起一条死隧道；闲置被 NAT/防火墙切断后进程会自行退出。
+- `stop` / 重复 `start` 靠**进程命令行**定位：`pgrep -f "ssh -f -N -R <port>:"`。`-R` 的监听在 Server 上，本机 `lsof -ti :<port>` 永远查不到，用它判断会误判为「没在跑」并残留旧进程。
+- **`start` 打印 “Tunnel started” 不等于通了**：`ssh -f` 只说明隧道进程起来、SSH 登录成功；设备那一跳是否可达，要到真有连接进来才知道。验证要在 **Server** 上做：
+
+  ```bash
+  ss -ltn | grep -E ':1230[23]'     # 应看到 127.0.0.1:1230x 在监听
+  ./rcmd exec sc51213 "ls /tmp"     # 端到端
+  ```
+
+排障：Server 上**没有**该端口监听 → PC 侧隧道没起或被切断，在 PC 上重跑 `./tunnel.sh start`；**有**监听但 telnet/ssh 握手失败 → PC 到设备那一跳不通（设备 IP 写错、设备不在网、或与其他客户端抢占）。
+
+WSL：脚本是纯 bash + ssh，WSL 与原生 Linux 都能直接跑；但隧道随 WSL 会话结束而断（`wsl --shutdown`、Windows 休眠都会断），断了重跑 `./tunnel.sh start` 即可。
